@@ -5,6 +5,7 @@ payment-core/target/
 # Python
 __pycache__/
 *.egg-info/
+build/
 .venv/
 .pytest_cache/
 .mypy_cache/

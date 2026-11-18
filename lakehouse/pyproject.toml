@@ -1,0 +1,43 @@
+[build-system]
+requires = ["setuptools>=69"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "kaarangepay-lake"
+version = "0.1.0"
+description = "Spark jobs of the KaaranguePay lakehouse: bronze CDC events -> silver Delta tables, with ledger checks."
+requires-python = ">=3.10"
+# pyspark itself comes from the Spark image (or from the `dev` extra for tests).
+dependencies = ["boto3>=1.34,<2"]
+
+[project.optional-dependencies]
+dev = ["pyspark==3.5.8", "pytest>=8", "ruff>=0.6", "mypy>=1.11", "boto3-stubs[s3]>=1.34"]
+
+[project.scripts]
+lake = "kaarangepay_lake.cli:main"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+
+[tool.ruff]
+line-length = 120
+target-version = "py310"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "B", "UP", "SIM", "RUF"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["kaarangepay_lake", "bronze"]
+
+[tool.mypy]
+strict = true
+python_version = "3.10"
+mypy_path = "src"
+
+[[tool.mypy.overrides]]
+module = ["pyspark", "pyspark.*"]
+ignore_missing_imports = true

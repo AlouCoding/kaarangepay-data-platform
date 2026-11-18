@@ -22,6 +22,7 @@
 | 7 | Tests d'intégration : `Could not find a valid Docker environment` | Dépendance | Testcontainers 1.21.3 incompatible avec Docker 29 | ✅ Corrigé (26/26 tests verts) |
 | 8 | Mode `live` : 422 à l'ouverture des comptes | Bug générateur | Même graine = mêmes numéros de téléphone | ✅ Corrigé (session 4) |
 | 9 | `bronze-writer depends on undefined service "kafka"` | Bug (doc) | Profil `cdc` oublié : le bronze dépend de Kafka | ✅ Corrigé (session 5) |
+| 10 | `ModuleNotFoundError: kaarangepay_lake` dans l'image Spark | Bug (image) | pip trop ancien dans l'image : il a construit un paquet **vide** (`UNKNOWN-0.0.0`) | ✅ Corrigé (session 6) |
 
 Bilan : **le code Java a démarré du premier coup** (Flyway, validation Hibernate, ledger).
 Tous les blocages venaient de l'environnement, de la documentation ou du générateur.
@@ -617,6 +618,71 @@ n'importe quelle date.
 | Pourquoi Parquet ? | Format colonnaire compressé (zstd) : Spark et dbt lisent seulement les colonnes utiles. |
 | Pourquoi garder le JSON brut dans `payload` ? | Le bronze ne transforme rien : si on se trompe plus tard, on peut tout recalculer depuis le brut. |
 | Comment prouves-tu qu'il ne manque rien ? | `reconcile` : offsets contigus par partition, totaux = PostgreSQL. |
+
+---
+
+## Session 6 — 18 novembre 2026 (nuit) : phase 3a, Spark et la couche silver ✅
+
+**Objectif :** transformer les événements bruts du bronze en tables silver propres (Delta Lake), puis
+**re-vérifier les invariants du ledger sur le lakehouse** (ADR 0008, guide `docs/GUIDE-PHASE3-FR.md`).
+
+### Découvert en préparant : la CI de `a10a452` avait un piège
+Le job `docker-images` lançait `docker compose --profile traffic --profile bronze build`. C'est **la même
+erreur** que celle rencontrée à la main en session 5 : `bronze-writer` dépend de `kafka`, qui est dans le
+profil `cdc`. Vérifié avec `docker compose ... config -q`. Corrigé : la CI active `cdc`, `bronze` et `lake`.
+**À retenir :** une erreur corrigée à la main doit aussi être corrigée partout où la même commande existe.
+
+### Choix
+Spark 3.5.8 en mode local, Delta Lake 3.3.2, reconstruction complète puis écrasement atomique,
+bibliothèques Java intégrées à l'image au build. Détails et justifications : ADR 0008.
+
+### Tests (sans Docker) : 13/13 verts du premier coup
+Dont deux tests qui montrent l'intérêt des contrôles : **retirer une seule écriture** du ledger fait
+échouer « transaction équilibrée » et « solde = somme des écritures » ; perdre une mise à jour de solde
+fait échouer « somme des soldes = 0 ».
+
+### Erreur : `ModuleNotFoundError: No module named 'kaarangepay_lake'` (3 tentatives)
+Le build passe, mais le job ne trouve pas notre propre paquet.
+
+| Tentative | Hypothèse | Résultat |
+|---|---|---|
+| 1 | pip installe dans un dossier invisible → `--target /opt/lake-deps` + `PYTHONPATH` | Même erreur |
+| 2 | `spark-submit` perd `PYTHONPATH` → `run.py` ajoute le dossier à `sys.path` | Même erreur |
+| 3 | **On arrête de deviner et on regarde** : `ls /opt/lake-deps` | Le dossier ne contient que `UNKNOWN-0.0.0.dist-info` |
+
+**Vraie cause :** l'image Spark est basée sur Ubuntu 22.04, dont le pip et le setuptools sont trop anciens pour
+lire la section `[project]` de notre `pyproject.toml` (format PEP 621). pip a donc construit un paquet **vide**
+nommé `UNKNOWN`, sans notre code ni boto3, et **sans aucune erreur**. Le diagnostic a aussi montré que
+`/opt/lake-deps` était bien dans `sys.path` : mes deux premières hypothèses étaient fausses.
+
+**Correction :** mettre à jour pip et setuptools dans l'image avant l'installation, puis **vérifier pendant le
+build** que `import kaarangepay_lake, boto3` fonctionne. Si l'installation est vide, c'est maintenant le build
+qui échoue, tout de suite, et pas le job plus tard.
+
+**À retenir :**
+- Quand un correctif échoue, ne pas en empiler un autre : **observer** (ici, un simple `ls`).
+- Un build qui « réussit » ne prouve rien : ajouter un test dans le build (*fail fast*).
+
+### Résultats sur la vraie plateforme (Spark 3.5.8, Java 11, mode local)
+
+| Table | Événements bronze | Lignes silver | Rejetés | Explication |
+|---|---|---|---|---|
+| `accounts` | 2 172 | **1 112** | 0 | 1 112 comptes ; les 1 060 autres événements étaient des mises à jour de solde |
+| `transactions` | 133 845 | **133 845** | 0 | Insert-only : 1 événement = 1 ligne |
+| `ledger_entries` | 309 668 | **309 668** | 0 | Insert-only, identique à PostgreSQL |
+
+**Les 10 contrôles qualité sont `[OK]`**, dont les 3 invariants du ledger recalculés sur le lakehouse :
+somme des soldes = 0, chaque transaction équilibrée, solde = somme des écritures pour chaque compte.
+
+**Ce que ça prouve :** l'argent compté dans PostgreSQL et l'argent compté dans Delta Lake, après être passé par
+Debezium, Kafka, le bronze et Spark, **sont identiques au franc près**. Aucun événement perdu, dupliqué ou
+mis dans le désordre sur ~445 000.
+
+**Durée : 100 s.** Honnêtement, c'est lent pour ce volume. Raison principale : chaque `count()` et chaque
+contrôle relit les fichiers depuis S3 (Spark est *paresseux* : il recalcule tout à chaque action). Piste pour plus
+tard : mettre les tables en cache avant les contrôles. Pas urgent.
+
+Pendant le job, l'interface Spark (http://localhost:4040) montre les *jobs*, *stages* et *tasks*.
 
 ---
 

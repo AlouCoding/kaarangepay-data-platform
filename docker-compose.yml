@@ -181,6 +181,26 @@ services:
       seaweedfs:
         condition: service_started
 
+  # ===========================================================================
+  # Phase 3a — lakehouse: Spark rebuilds the silver layer (Delta Lake) from bronze
+  # Run with:  set COMPOSE_PROFILES=cdc,bronze,lake
+  #            docker compose run --rm lake silver
+  # See docs/adr/0008 and docs/GUIDE-PHASE3-FR.md
+  # ===========================================================================
+  lake:
+    build: ./lakehouse
+    profiles: ["lake"]
+    environment:
+      S3_ENDPOINT: http://seaweedfs:8333
+      BRONZE_PATH: s3a://bronze
+      SILVER_PATH: s3a://silver
+      LAKE_FORMAT: delta
+    ports:
+      - "4040:4040"   # Spark UI while a job runs
+    depends_on:
+      seaweedfs:
+        condition: service_started
+
 volumes:
   pgdata:
   kafkadata:

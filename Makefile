@@ -1,4 +1,4 @@
-.PHONY: help up down reset logs test test-java test-python backfill live integrity psql cdc-up cdc-status cdc-topics cdc-down bronze-up bronze-reconcile
+.PHONY: help up down reset logs test test-java test-python backfill live integrity psql cdc-up cdc-status cdc-topics cdc-down bronze-up bronze-reconcile silver
 
 help:            ## Show this help
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -23,6 +23,7 @@ test-java:       ## Unit + integration tests (needs Docker for Testcontainers)
 test-python:     ## Lint, type-check and test the Python services
 	cd traffic-generator && ruff check src tests && mypy src && pytest -q
 	cd bronze-writer && ruff check src tests && mypy src && pytest -q
+	cd lakehouse && ruff check src tests && mypy src && pytest -q
 
 backfill:        ## Generate 30 days of history (Nov 2026) with simulated event times
 	mkdir -p data
@@ -57,3 +58,6 @@ bronze-up:       ## Phase 2b: start SeaweedFS + bronze-writer (needs the cdc pro
 
 bronze-reconcile: ## Check the bronze layer: offsets contiguous, no duplicates
 	docker compose --profile cdc --profile bronze run --rm bronze-writer reconcile
+
+silver:          ## Phase 3a: rebuild silver (Delta) from bronze with Spark, then run the ledger checks
+	docker compose --profile cdc --profile bronze --profile lake run --rm lake silver

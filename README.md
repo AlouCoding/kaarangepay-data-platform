@@ -11,7 +11,7 @@ A transactional core produces correct, realistic payment data: double-entry ledg
 idempotent API, fraud scenarios, paydays and holiday peaks. On top of it, a data
 platform captures, streams, models and checks that data (phases 2–5).
 
-> **Status: Phase 1 — transactional source** ✅ · **Phase 2a — CDC with Debezium + Kafka** ✅ · **Phase 2b — bronze layer** ✅
+> **Status: Phase 1 — transactional source** ✅ · **Phase 2a — CDC with Debezium + Kafka** ✅ · **Phase 2b — bronze layer** ✅ · **Phase 3a — silver (Spark + Delta)** ✅
 > KaaranguéPay is a fictional brand. Fee rules, traffic patterns and amounts are illustrative
 > assumptions, not data from any real operator.
 
@@ -37,7 +37,8 @@ flowchart LR
 | 1. Source | payment-core, double-entry ledger, idempotency, traffic generator, CI | ✅ |
 | 2a. CDC | Debezium reads PostgreSQL's WAL → one Kafka topic per table, Kafka UI, reconciliation | ✅ |
 | 2b. Bronze | Own Kafka consumer → raw CDC events as Parquet on S3-compatible storage (SeaweedFS), exactly-once effect | ✅ |
-| 3. Streaming | Spark Structured Streaming: silver/gold, real-time fraud features | ⏳ |
+| 3a. Silver | Spark rebuilds current-state Delta tables from bronze; ledger invariants re-checked on the lake | ✅ |
+| 3b. Streaming | Spark Structured Streaming on Kafka: windowed fraud features, alerts topic | ⏳ |
 | 4. Batch & BI | Airflow + dbt star schema, data quality tests, reconciliation, Superset | ⏳ |
 | 5. ML & polish | Fraud model with MLflow, observability, Kubernetes, demo video | ⏳ |
 
@@ -60,6 +61,7 @@ Each decision is documented as an [ADR](docs/adr). A French walkthrough with wor
 | [0005](docs/adr/0005-integer-amounts-in-xof.md) | Integer amounts in XOF, fees in basis points |
 | [0006](docs/adr/0006-change-data-capture-with-debezium.md) | Log-based CDC with Debezium instead of polling or dual writes |
 | [0007](docs/adr/0007-bronze-layer-writer.md) | Bronze layer: own consumer, write-then-commit, deterministic file keys, SeaweedFS instead of MinIO |
+| [0008](docs/adr/0008-silver-layer-spark-delta.md) | Silver layer: Spark full rebuild into Delta Lake, latest event per key by Kafka offset, quality gate |
 
 ### Concurrency
 Accounts are locked with `SELECT … FOR UPDATE` **in a global id order**, so concurrent
@@ -114,6 +116,29 @@ Measured result (first full run):
 | `accounts` (change events) | 2,172 | 3 | — | 0 | 0 |
 
 The end-to-end chain **PostgreSQL → Debezium → Kafka → Parquet** loses nothing and duplicates nothing.
+
+## Silver layer (phase 3a)
+
+```bash
+docker compose --profile cdc --profile bronze --profile lake run --rm lake silver
+```
+
+A PySpark job (`lakehouse/`) decodes each raw Debezium envelope, keeps the **latest event per primary
+key** (ordered by Kafka offset, deletes remove the key), casts the columns and atomically overwrites a
+**Delta Lake** table on S3. It then re-checks **on the lake** the same three ledger invariants that
+payment-core checks in PostgreSQL (sum of balances = 0, every transaction balanced, balance = sum of
+entries), plus key uniqueness and referential integrity. A single lost event fails the run (tested).
+
+Measured result (first full run, Spark 3.5.8 local mode):
+
+| Table | Bronze events | Silver rows | Rejected |
+|---|---|---|---|
+| `accounts` | 2,172 | 1,112 | 0 |
+| `transactions` | 133,845 | 133,845 | 0 |
+| `ledger_entries` | 309,668 | 309,668 | 0 |
+
+**10/10 quality checks passed**: the money counted in PostgreSQL and the money counted in Delta Lake,
+after Debezium, Kafka, bronze and Spark, match to the last franc.
 
 ## Data model
 
@@ -225,6 +250,7 @@ CI runs both on every push (GitHub Actions).
 │   └── src/main/resources/db/migration   Flyway migrations
 ├── traffic-generator/     Python package `mmgen`
 ├── bronze-writer/         Kafka → Parquet → S3 consumer (phase 2b)
+├── lakehouse/             PySpark jobs: bronze → silver Delta tables + quality checks (phase 3)
 ├── cdc/connectors/        Debezium connector configuration
 ├── docs/adr/              Architecture Decision Records
 ├── docs/GUIDE-FR.md       Walkthrough with workflow diagrams (French)
