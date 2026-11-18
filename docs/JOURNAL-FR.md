@@ -19,7 +19,6 @@
 | 4 | `unrecognized arguments: --rate` | Bug (doc) | Ordre des options CLI | ✅ Corrigé |
 | 5 | Logs illisibles pendant le backfill | Confort | `httpx` logue chaque requête | ✅ Corrigé |
 | 6 | **Taux d'échec de 16 à 31 %** | **Bug de modélisation** | L'argent fuit hors des clients | ⏳ v1.1 |
-| 7 | Tests d'intégration : `Could not find a valid Docker environment` | Dépendance | Testcontainers 1.21.3 incompatible avec Docker 29 | ✅ Corrigé |
 
 Bilan : **le code Java a démarré du premier coup** (Flyway, validation Hibernate, ledger).
 Tous les blocages venaient de l'environnement, de la documentation ou du générateur.
@@ -221,90 +220,6 @@ flowchart LR
 > en a moins de 5 %. Le ledger était correct, c'était la simulation : l'argent sortait des clients plus
 > vite qu'il n'entrait, et les commerçants ne reversaient jamais leurs recettes. J'ai rééquilibré les flux
 > et ajouté un test qui vérifie le taux d'échec. »
-
----
-
-### Résultats définitifs du backfill (30 jours, novembre 2026)
-
-| Indicateur | Valeur |
-|---|---|
-| Durée | 654 s (~11 min) |
-| Appels API | 134 335 |
-| Débit moyen | **205 tx/s** (PC portable, Docker Desktop) |
-| Replays idempotents | 1 329 (~1 %, conforme à `--duplicate-rate 0.01`) |
-| Fraudes « account takeover » | 224 (~0,17 % ; les victimes presque vides sont sautées) |
-| Recharges d'agents | 39 |
-
-| Type | Réussies | Échouées | % échec |
-|---|---|---|---|
-| CASH_IN | 29 475 | 39 | 0,1 % ✅ |
-| PAYMENT | 38 568 | 7 212 | 15,8 % ❌ |
-| TRANSFER | 8 587 | 3 537 | 29,2 % ❌ |
-| CASH_OUT | 32 357 | 14 560 | 31,0 % ❌ |
-
-**Cohérence :** 39 CASH_IN échoués = 39 recharges d'agents. Chaque agent à court de float a fait échouer
-un CASH_IN, a été rechargé, puis le CASH_IN a été relancé.
-
-#### Le ledger tient après 134 000 opérations concurrentes ✅
-```json
-{"sumOfBalances":0,"unbalancedTransactions":0,"accountsWithDrift":0,"healthy":true}
-```
-
-#### Où est l'argent ? Le diagnostic est confirmé ✅
-
-| Type de compte | Comptes | Solde total (XOF) | Part |
-|---|---|---|---|
-| MERCHANT | 40 | 187 238 525 | **70 %** |
-| AGENT | 15 | 43 565 969 | 16 % |
-| CUSTOMER | 500 | 35 739 810 | **13 %** |
-| SYSTEM | 2 | −266 544 304 | (contrepartie) |
-
-**Vérification à la main de l'invariant :**
-43 565 969 + 35 739 810 + 187 238 525 = **266 544 304** et 266 544 304 − 266 544 304 = **0** ✅
-
-**Ce qu'on peut déduire sans requête supplémentaire :**
-- Monnaie émise par le TREASURY : (15 agents au départ + 39 recharges) × 5 000 000 = **270 000 000 XOF**,
-  donc TREASURY = −270 000 000.
-- SYSTEM = TREASURY + FEES = −266 544 304, donc **FEES = 3 455 696 XOF** de frais encaissés en un mois.
-- **40 commerçants détiennent 70 % de l'argent**, contre 13 % pour 500 clients.
-  C'est la preuve chiffrée de la fuite : l'argent entre chez les commerçants et n'en ressort jamais.
-
-> Le système est juste (invariants à 0), la simulation est déséquilibrée. Correction en v1.1.
-
----
-
-### 7. `mvn verify` : les tests d'intégration ne trouvent pas Docker
-
-**Contexte :** ni Java ni Maven n'étaient installés sur le PC. Les tests ont donc été lancés **dans le conteneur Maven**,
-avec le socket Docker monté pour que Testcontainers puisse lancer un PostgreSQL de test :
-```bat
-docker run --rm -v "%cd%:/app" -w /app -v m2cache:/root/.m2 -v /var/run/docker.sock:/var/run/docker.sock ^
-  -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal maven:3.9-eclipse-temurin-21 mvn -B verify
-```
-
-**Résultat :** **le code compile et les 15 tests unitaires passent** (frais, routage, hash, horloge).
-Les 2 classes de tests d'intégration échouent avant même de démarrer :
-```
-UnixSocketClientProviderStrategy: failed with exception BadRequestException (Status 400 ...)
-IllegalStateException: Could not find a valid Docker environment
-```
-
-**Cause :** Docker Engine 29 a relevé la version minimale de l'API Docker à 1.44.
-Testcontainers 1.21.3 (la version fournie par Spring Boot 3.5.7) demande l'API 1.32, et le démon répond `400`.
-Le socket était bien accessible : le démon a répondu, il a seulement refusé la version demandée.
-Ce problème a touché énormément de projets Java fin 2025.
-
-**Correction :** forcer Testcontainers **1.21.4**, qui utilise une API compatible, dans `pom.xml` :
-```xml
-<testcontainers.version>1.21.4</testcontainers.version>
-```
-Spring Boot gère les versions des dépendances via des *properties* : il suffit de surcharger celle-ci.
-
-**À retenir**
-- Les tests unitaires (sans Docker) et les tests d'intégration (avec Docker) échouent pour des raisons différentes.
-  Ici, la logique métier était validée ; seul l'outillage était cassé.
-- Une mise à jour d'infrastructure (Docker 29) peut casser un projet sans qu'une ligne de code change.
-  C'est pour ça qu'on fige et qu'on documente les versions.
 
 ---
 

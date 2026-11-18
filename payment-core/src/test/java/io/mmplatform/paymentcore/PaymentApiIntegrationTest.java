@@ -58,6 +58,21 @@ class PaymentApiIntegrationTest extends AbstractIntegrationTest {
     }
 
     @Test
+    void merchantCanWithdrawTakingsAtAnAgent() {
+        UUID agent = fundedAgent(500_000);
+        UUID alice = open("CUSTOMER");
+        UUID shop = open("MERCHANT");
+        post("CASH_IN", agent, alice, 100_000);
+        post("PAYMENT", alice, shop, 40_000);
+
+        ResponseEntity<TransactionResponse> withdrawal = post("CASH_OUT", shop, agent, 30_000);
+
+        assertThat(withdrawal.getStatusCode()).isEqualTo(HttpStatus.CREATED);
+        assertThat(withdrawal.getBody().fee()).isEqualTo(150); // 0.5 % cash-out fee
+        assertThat(balance(shop)).isEqualTo(40_000 - 30_000 - 150);
+    }
+
+    @Test
     void insufficientFundsIsRecordedAsFailedAndMovesNothing() {
         UUID alice = open("CUSTOMER");
         UUID bob = open("CUSTOMER");

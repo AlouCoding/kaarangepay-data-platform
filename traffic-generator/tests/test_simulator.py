@@ -1,6 +1,6 @@
 import json
 import random
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 
 from fake_api import FakePaymentApi
@@ -12,7 +12,9 @@ from mmgen.simulator import (
     MAX_AMOUNT,
     MIN_AMOUNT,
     Simulator,
+    affordable_amount,
     build_population,
+    fee_for,
     sample_amount,
 )
 
@@ -96,3 +98,47 @@ def test_fraud_rate_controls_frequency() -> None:
         sim.step(TS, random.Random(i))
     assert sim.stats.fraud_cases > 0
     assert len(sim.labels.labels) >= sim.stats.fraud_cases
+
+
+# ---- v1.1: balanced money flows --------------------------------------------------
+
+def run(sim: Simulator, steps: int, start: datetime = TS) -> None:
+    for i in range(steps):
+        # Spread events over 30 days so paydays and normal days are both covered.
+        sim.step(start + timedelta(hours=i * 720 / steps), random.Random(i))
+
+
+def test_affordable_amount_is_the_largest_payable_amount() -> None:
+    for tx_type in ("TRANSFER", "CASH_OUT", "PAYMENT"):
+        for balance in (0, 99, 100, 101, 10_100, 523_456, 2_000_000):
+            amount = affordable_amount(tx_type, balance)
+            assert amount + fee_for(tx_type, amount) <= balance
+            assert amount + 1 + fee_for(tx_type, amount + 1) > balance
+
+
+def test_failure_rate_is_realistic() -> None:
+    """The v1.0 bug: 16-31 % refusals. Target: a few percent, mostly deliberate over-spending."""
+    sim, api = make_sim()
+    run(sim, 6_000, start=datetime(2026, 11, 1, tzinfo=UTC))
+    assert 0.01 <= sim.stats.failure_rate() <= 0.05, sim.stats.by_type_status
+    assert total_money(api) == 0
+
+
+def test_money_keeps_circulating() -> None:
+    """Merchants withdraw their takings and salaries arrive: customers are not drained."""
+    sim, api = make_sim()
+    run(sim, 6_000, start=datetime(2026, 11, 1, tzinfo=UTC))
+    merchants = sum(api.balances[m] for m in sim.pop.merchants)
+    customers = sum(api.balances[c] for c in sim.pop.customers)
+    assert sim.stats.merchant_cash_outs > 0
+    assert sim.stats.salaries > 0
+    assert merchants < customers, f"merchants={merchants} customers={customers}"
+
+
+def test_onboarding_happens_the_day_before_the_window() -> None:
+    _, api = make_sim()
+    times = [t for t in api.occurred_at.values() if t is not None]
+    assert times
+    day_before = TS.replace(hour=0) - timedelta(days=1)
+    assert all(day_before <= t < day_before + timedelta(days=1) for t in times)
+    assert all(6 <= t.hour < 21 for t in times)

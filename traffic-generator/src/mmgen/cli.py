@@ -121,6 +121,9 @@ def report(sim: Simulator, elapsed_s: float) -> None:
         log.info("  %-28s %8d", key, count)
     log.info("  replays=%d fraud_cases=%d agent_topups=%d",
              stats.replays, stats.fraud_cases, stats.agent_topups)
+    log.info("  salaries=%d merchant_cash_outs=%d overspend_attempts=%d",
+             stats.salaries, stats.merchant_cash_outs, stats.overspend_attempts)
+    log.info("  failure rate: %.1f %% (target: a few percent)", 100 * stats.failure_rate())
 
 
 if __name__ == "__main__":

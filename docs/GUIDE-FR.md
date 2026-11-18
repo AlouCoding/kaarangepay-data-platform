@@ -43,13 +43,14 @@ flowchart LR
     T["TREASURY"] -->|"FLOAT_TOPUP"| A["AGENT"]
     A -->|"CASH_IN<br/>(gratuit)"| C1["CUSTOMER"]
     C1 -->|"CASH_OUT<br/>(0,5 %)"| A
+    M -->|"CASH_OUT recettes<br/>(0,5 %, v1.1)"| A
     C1 -->|"TRANSFER<br/>(1 %)"| C2["CUSTOMER"]
     C1 -->|"PAYMENT<br/>(gratuit)"| M["MERCHANT"]
 ```
 
 - **FLOAT_TOPUP** : l'agent dépose du cash à la banque et reçoit de la monnaie électronique (« float »).
 - **CASH_IN** : un client donne du cash à l'agent et reçoit de l'argent sur son téléphone.
-- **CASH_OUT** : l'inverse, un retrait.
+- **CASH_OUT** : l'inverse, un retrait. Depuis la v1.1, un **commerçant** peut aussi retirer ses recettes.
 - **TRANSFER** : d'un client à un autre.
 - **PAYMENT** : d'un client à un commerçant.
 
@@ -250,8 +251,14 @@ flowchart TD
     A["Calendrier<br/>jour/nuit, paie, fêtes"] --> B["Processus de Poisson<br/>(heures des événements)"]
     B --> C{"Tirage aléatoire"}
     C -->|"0,2 %"| F["Fraude : account takeover"]
-    C -->|"99,8 %"| N["Transaction normale<br/>CASH_OUT 35 %, PAYMENT 34 %,<br/>CASH_IN 22 %, TRANSFER 9 %"]
-    N --> D{"Agent sans float ?"}
+    C -->|"3 %"| MC["Commerçant retire ses recettes"]
+    C -->|"période de paie"| S["Salaire (gros CASH_IN)"]
+    C -->|"le reste"| N["Transaction normale<br/>PAYMENT 38 %, CASH_OUT 30 %,<br/>CASH_IN 24 %, TRANSFER 8 %"]
+    N --> B{"Le client a-t-il<br/>assez sur son solde ?"}
+    B -->|"oui"| OK["Dépense dans ses moyens"]
+    B -->|"portefeuille vide"| CI["Va d'abord faire un CASH_IN"]
+    B -->|"3 % des cas"| OS["Tente de dépenser trop<br/>(refus réaliste)"]
+    CI --> D{"Agent sans float ?"}
     D -->|"oui"| T["FLOAT_TOPUP puis retry"]
     N --> R["1 % : retry avec la même clé<br/>(doit être rejoué)"]
     F --> F1["TRANSFER : victime → mule<br/>(vide le compte)"]
@@ -264,6 +271,8 @@ flowchart TD
   dans les jours **avant Tabaski et Korité** (dates 2026 approximatives).
 - **Les gros utilisateurs** (loi de Pareto) et **les commerçants populaires** (loi de Zipf).
 - **Les montants** suivent une loi log-normale, arrondis à 25 XOF.
+- **Les clients connaissent leur solde** (v1.1) : le générateur tient son propre « carnet de soldes »
+  (`BalanceBook`), mis à jour avec les réponses de l'API, comme un client qui regarde son appli avant de payer.
 - **La fraude** suit le schéma de PaySim : vider un compte vers une « mule » qui retire vite le cash.
 - **Les labels** : en vrai, on découvre la fraude plus tard (plainte, enquête). Le générateur
   écrit la vérité dans un fichier séparé. L'API ne la voit jamais. En phase 4, ces labels

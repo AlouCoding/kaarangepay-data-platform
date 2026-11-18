@@ -23,6 +23,7 @@ class TransactionRulesTest {
         assertThat(TransactionType.FLOAT_TOPUP.allows(SYSTEM, AGENT)).isTrue();
         assertThat(TransactionType.CASH_IN.allows(AGENT, CUSTOMER)).isTrue();
         assertThat(TransactionType.CASH_OUT.allows(CUSTOMER, AGENT)).isTrue();
+        assertThat(TransactionType.CASH_OUT.allows(MERCHANT, AGENT)).isTrue(); // merchant takings (v1.1)
         assertThat(TransactionType.TRANSFER.allows(CUSTOMER, CUSTOMER)).isTrue();
         assertThat(TransactionType.PAYMENT.allows(CUSTOMER, MERCHANT)).isTrue();
 

@@ -82,6 +82,7 @@ Comparing both sides is a real OLTP ↔ analytics reconciliation.
 
 Transaction types follow the vocabulary of the public **PaySim** dataset:
 `CASH_IN`, `CASH_OUT`, `PAYMENT`, `TRANSFER`, plus `FLOAT_TOPUP` (treasury → agent).
+Merchants can also `CASH_OUT` their takings at an agent, so money keeps circulating.
 
 ## Realistic traffic
 
@@ -92,6 +93,9 @@ The generator models a non-homogeneous Poisson process (Lewis-Shedler thinning) 
 - a calmer Sunday;
 - holidays, with a strong peak in the days **before Tabaski and Korité** (2026 dates are approximate);
 - heavy users (Pareto) and popular merchants (Zipf);
+- **balance-aware customers**: they spend within their balance, except a deliberate ~3 % of
+  over-spending attempts; an empty wallet leads to a `CASH_IN` at an agent;
+- salaries during the payday period, and merchants withdrawing their takings;
 - **fraud**: account takeover → the victim is drained by a `TRANSFER` to a mule, who then does a `CASH_OUT` 2–30 minutes later. Ground-truth labels are written to `data/labels/fraud_labels.jsonl` (never sent to the API);
 - client retries with the same idempotency key, which must be replayed, not re-executed.
 
@@ -117,8 +121,8 @@ docker compose exec postgres psql -U mmplatform -d mmplatform
 With `make` installed (Linux/macOS): `make up`, `make backfill`, `make integrity`, `make psql`.
 If port 8080 is taken, set `APP_PORT` (e.g. `APP_PORT=8082`).
 
-> On a run of 30 simulated days on a laptop: **134,335 API calls at ~205 tx/s**,
-> 1,329 idempotent replays, and the ledger invariants still at zero.
+> On a run of 30 simulated days on a laptop (generator v1.1): **134,004 API calls at ~328 calls/s**,
+> 2.3 % refused payments, 1,269 idempotent replays, and the ledger invariants still at zero.
 
 Example API calls:
 
@@ -156,7 +160,7 @@ docker run --rm -v "$PWD:/app" -w /app -v m2cache:/root/.m2 \
 (On Windows `cmd`, replace `$PWD` with `%cd%` and put the command on one line.
 With Java 21 + Maven installed: `mvn verify`, or `make test` for everything.)
 
-**26 tests, all green:**
+**27 tests, all green:**
 
 - **payment-core**: unit tests (fees, routing, hashing, clock) and integration tests
   against a real PostgreSQL with **Testcontainers**: money flows, failures, idempotent
@@ -189,5 +193,7 @@ CI runs both on every push (GitHub Actions).
 - The FEES and TREASURY rows are hot spots under very high load (see ADR 0002).
 - No authentication yet: the API is meant to run on a private network in this project.
 - `X-Simulated-Time` exists for backfills only and is disabled by default.
-- The traffic generator currently over-drains customer wallets (16–31 % refused payments);
-  rebalancing money flows is the next fix (v1.1). See the engineering log.
+- Fixed in v1.1: the first generator drained customer wallets (16–31 % refused payments, 70 % of
+  the money stuck at merchants). Flows are now balanced: 2.3 % refusals measured on a 30-day run.
+  Next tuning (v1.2): customers accumulate too much (salaries) and merchants keep almost nothing.
+  See the engineering log for the investigation.

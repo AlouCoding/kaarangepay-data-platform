@@ -20,8 +20,8 @@ public enum TransactionType {
     FLOAT_TOPUP(EnumSet.of(SYSTEM), EnumSet.of(AGENT)),
     /** A customer gives cash to an agent and receives e-money. */
     CASH_IN(EnumSet.of(AGENT), EnumSet.of(CUSTOMER)),
-    /** A customer withdraws cash at an agent. Fee applies. */
-    CASH_OUT(EnumSet.of(CUSTOMER), EnumSet.of(AGENT)),
+    /** A customer withdraws cash at an agent, or a merchant withdraws their takings. Fee applies. */
+    CASH_OUT(EnumSet.of(CUSTOMER, MERCHANT), EnumSet.of(AGENT)),
     /** Person-to-person transfer. Fee applies. */
     TRANSFER(EnumSet.of(CUSTOMER), EnumSet.of(CUSTOMER)),
     /** A customer pays a merchant. Free for the customer. */
