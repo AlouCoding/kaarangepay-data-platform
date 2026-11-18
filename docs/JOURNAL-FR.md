@@ -686,6 +686,62 @@ Pendant le job, l'interface Spark (http://localhost:4040) montre les *jobs*, *st
 
 ---
 
+## Session 7 — 18 novembre 2026 (nuit) : phase 3b, la fraude en temps réel ✅
+
+**Objectif :** détecter les prises de contrôle de compte en streaming et **mesurer** la qualité de la détection
+contre les labels du générateur (ADR 0009, guide phase 3, sections 9 à 15).
+
+### Avant de coder : regarder comment la fraude est simulée
+Lecture de `simulator.py` → `account_takeover` : la victime transfère presque tout son solde à une mule
+(~1 % des clients), qui retire **99,5 %** du montant en cash **2 à 30 min** après. Conclusion : une règle de
+vitesse ne verrait rien. Il faut relier les deux opérations → **jointure stream-stream**.
+
+### Piège anticipé : le watermark
+En backfill, le cash-out est envoyé tout de suite mais **daté jusqu'à 30 min dans le futur**. Un watermark court
+aurait jeté les transactions normales suivantes comme « en retard ». Choix : 45 min, justifié dans l'ADR.
+
+### Tests : 21/21 (8 nouveaux)
+Dont un test **en vrai streaming** (source fichiers, watermark, deux micro-batchs : le transfert et son cash-out
+arrivent séparément et sont quand même reliés), et un test d'évaluation avec un faux positif volontaire (client
+honnête) et une fraude ratée volontaire, pour vérifier les formules de précision et de rappel.
+
+### Résultats sur la vraie plateforme
+
+`lake fraud` a lu tout le topic `transactions` (~134 000 messages) par micro-batchs, puis s'est arrêté seul.
+`lake fraud-eval` :
+
+| Mesure | Valeur | Lecture |
+|---|---|---|
+| Alertes | **261** | 1 alerte = 1 paire (transfert entrant, cash-out) |
+| Transactions frauduleuses connues | 492 | 246 cas × 2 (le vidage + le retrait de la mule) |
+| Transactions signalées | 522 | |
+| Vrais positifs | 490 | |
+| **Précision** | **93,9 %** | Sur 100 transactions signalées, ~94 sont de vraies fraudes |
+| **Rappel** | **99,6 %** | Une seule fraude sur 246 a échappé |
+| Cas détectés | **245 / 246** | |
+
+**Lecture honnête :**
+- Les **32 transactions signalées à tort** (522 − 490) sont ~16 paires de clients honnêtes qui ont reçu un transfert
+  et l'ont retiré presque en entier dans les 30 min. C'est le faux positif annoncé dans l'ADR 0009 : une règle sans
+  contexte ne peut pas distinguer une mule d'une personne qui retire l'argent envoyé par sa famille.
+- **Un cas raté** sur 246 : pas encore analysé (cash-out hors de la fenêtre de 30 min, ou montant hors de 90-100 %).
+  À regarder en phase 5.
+- **Limite importante :** ces chiffres sont bons parce que la fraude simulée suit **exactement** le motif que la règle
+  cherche. Sur de vraies données, les fraudeurs s'adaptent. La valeur du projet est la **méthode** (streaming correct
+  + mesure contre une vérité terrain), pas le 99,6 %.
+
+### Erreur rencontrée : des centaines de lignes `INTERNAL_ERROR Cannot evaluate expression: cashout_amount`
+Le job a **réussi**, mais il a inondé la console d'avertissements (~1 300 lignes).
+- **Cause :** Spark analyse la condition de jointure pour savoir quand il peut oublier l'état. J'y avais mis aussi la
+  comparaison des montants (`cash-out ≥ 90 % du transfert`) ; Spark a essayé d'en tirer une borne de temps, n'y est
+  pas arrivé, et l'a signalé à chaque micro-batch. Ce n'était qu'un avertissement : le résultat était juste.
+- **Correction :** la condition de jointure ne contient plus que la clé et la borne de temps ; les montants sont
+  filtrés **juste après** la jointure. Pour une jointure interne, c'est exactement le même résultat (21 tests verts).
+- **À retenir :** dans une jointure stream-stream, la condition sert aussi à **gérer l'état**. N'y mettre que la clé
+  et le temps.
+
+---
+
 ### Requêtes SQL utiles (pour explorer soi-même)
 
 ```sql

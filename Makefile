@@ -1,4 +1,4 @@
-.PHONY: help up down reset logs test test-java test-python backfill live integrity psql cdc-up cdc-status cdc-topics cdc-down bronze-up bronze-reconcile silver
+.PHONY: help up down reset logs test test-java test-python backfill live integrity psql cdc-up cdc-status cdc-topics cdc-down bronze-up bronze-reconcile silver fraud fraud-eval
 
 help:            ## Show this help
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -61,3 +61,9 @@ bronze-reconcile: ## Check the bronze layer: offsets contiguous, no duplicates
 
 silver:          ## Phase 3a: rebuild silver (Delta) from bronze with Spark, then run the ledger checks
 	docker compose --profile cdc --profile bronze --profile lake run --rm lake silver
+
+fraud:           ## Phase 3b: streaming fraud detection on Kafka (processes what is there, then stops)
+	docker compose --profile cdc --profile bronze --profile lake run --rm lake fraud
+
+fraud-eval:      ## Phase 3b: precision / recall of the fraud alerts against the generator's labels
+	docker compose --profile cdc --profile bronze --profile lake run --rm lake fraud-eval

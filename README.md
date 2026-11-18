@@ -11,7 +11,7 @@ A transactional core produces correct, realistic payment data: double-entry ledg
 idempotent API, fraud scenarios, paydays and holiday peaks. On top of it, a data
 platform captures, streams, models and checks that data (phases 2–5).
 
-> **Status: Phase 1 — transactional source** ✅ · **Phase 2a — CDC with Debezium + Kafka** ✅ · **Phase 2b — bronze layer** ✅ · **Phase 3a — silver (Spark + Delta)** ✅
+> **Status: Phase 1 — transactional source** ✅ · **Phase 2a — CDC with Debezium + Kafka** ✅ · **Phase 2b — bronze layer** ✅ · **Phase 3a — silver (Spark + Delta)** ✅ · **Phase 3b — streaming fraud detection** ✅
 > KaaranguéPay is a fictional brand. Fee rules, traffic patterns and amounts are illustrative
 > assumptions, not data from any real operator.
 
@@ -38,7 +38,7 @@ flowchart LR
 | 2a. CDC | Debezium reads PostgreSQL's WAL → one Kafka topic per table, Kafka UI, reconciliation | ✅ |
 | 2b. Bronze | Own Kafka consumer → raw CDC events as Parquet on S3-compatible storage (SeaweedFS), exactly-once effect | ✅ |
 | 3a. Silver | Spark rebuilds current-state Delta tables from bronze; ledger invariants re-checked on the lake | ✅ |
-| 3b. Streaming | Spark Structured Streaming on Kafka: windowed fraud features, alerts topic | ⏳ |
+| 3b. Streaming | Spark Structured Streaming on Kafka: stream-stream join (mule pattern), watermark, alerts topic + gold Delta, precision/recall vs labels | ✅ |
 | 4. Batch & BI | Airflow + dbt star schema, data quality tests, reconciliation, Superset | ⏳ |
 | 5. ML & polish | Fraud model with MLflow, observability, Kubernetes, demo video | ⏳ |
 
@@ -62,6 +62,7 @@ Each decision is documented as an [ADR](docs/adr). A French walkthrough with wor
 | [0006](docs/adr/0006-change-data-capture-with-debezium.md) | Log-based CDC with Debezium instead of polling or dual writes |
 | [0007](docs/adr/0007-bronze-layer-writer.md) | Bronze layer: own consumer, write-then-commit, deterministic file keys, SeaweedFS instead of MinIO |
 | [0008](docs/adr/0008-silver-layer-spark-delta.md) | Silver layer: Spark full rebuild into Delta Lake, latest event per key by Kafka offset, quality gate |
+| [0009](docs/adr/0009-streaming-fraud-detection.md) | Real-time fraud: stream-stream join on event time, 45-min watermark, checkpoints, measured precision/recall |
 
 ### Concurrency
 Accounts are locked with `SELECT … FOR UPDATE` **in a global id order**, so concurrent
@@ -139,6 +140,31 @@ Measured result (first full run, Spark 3.5.8 local mode):
 
 **10/10 quality checks passed**: the money counted in PostgreSQL and the money counted in Delta Lake,
 after Debezium, Kafka, bronze and Spark, match to the last franc.
+
+## Real-time fraud detection (phase 3b)
+
+```bash
+docker compose --profile cdc --profile bronze --profile lake run --rm lake fraud        # Kafka -> alerts
+docker compose --profile cdc --profile bronze --profile lake run --rm lake fraud-eval   # precision / recall
+```
+
+The generator simulates account takeovers: a victim's wallet is drained to a **mule**, who withdraws it as
+cash minutes later. A velocity rule cannot see it (2 moves only); the signal is the **link** between the
+moves. A Spark Structured Streaming job reads Kafka, joins incoming transfers with cash-outs **on event
+time** (`occurred_at`, 30-min bound, 45-min watermark so state stays bounded), and publishes alerts to
+`kaarangepay.fraud.alerts` and a gold Delta table, with checkpoints on S3. Detection quality is
+**measured** against the generator's ground-truth labels, not claimed.
+
+| Metric (first full run, ~134k transactions) | Value |
+|---|---|
+| Alerts | 261 |
+| Precision (flagged transactions that are fraud) | **93.9 %** |
+| Recall (fraudulent transactions flagged) | **99.6 %** |
+| Fraud cases detected | 245 / 246 |
+
+Honest reading: the simulated fraud follows exactly the pattern the rule looks for, so these numbers are an upper
+bound. The false positives are honest customers who withdraw a transfer right away (e.g. remittances) — the
+limit of a context-free rule, to be addressed with ML in phase 5.
 
 ## Data model
 

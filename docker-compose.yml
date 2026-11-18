@@ -182,9 +182,12 @@ services:
         condition: service_started
 
   # ===========================================================================
-  # Phase 3a — lakehouse: Spark rebuilds the silver layer (Delta Lake) from bronze
-  # Run with:  set COMPOSE_PROFILES=cdc,bronze,lake
-  #            docker compose run --rm lake silver
+  # Phase 3 — lakehouse jobs (Spark): one image, several commands
+  #   docker compose run --rm lake silver        3a: bronze -> silver Delta + quality checks
+  #   docker compose run --rm lake fraud         3b: Kafka -> fraud alerts (topic + gold Delta)
+  #   docker compose run --rm lake fraud-eval    3b: precision / recall against the labels
+  # Profiles needed:  set COMPOSE_PROFILES=cdc,bronze,lake
+  # Spark UI: add --service-ports to `run` and open http://localhost:4040
   # See docs/adr/0008 and docs/GUIDE-PHASE3-FR.md
   # ===========================================================================
   lake:
@@ -195,11 +198,18 @@ services:
       BRONZE_PATH: s3a://bronze
       SILVER_PATH: s3a://silver
       LAKE_FORMAT: delta
+      GOLD_PATH: s3a://gold
+      KAFKA_BOOTSTRAP: kafka:9092
+      LABELS_PATH: file:///data/labels/fraud_labels.jsonl
+    volumes:
+      - ./data:/data:ro   # fraud labels written by the traffic generator (ground truth)
     ports:
       - "4040:4040"   # Spark UI while a job runs
     depends_on:
       seaweedfs:
         condition: service_started
+      kafka:
+        condition: service_healthy
 
 volumes:
   pgdata:

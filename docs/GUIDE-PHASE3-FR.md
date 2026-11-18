@@ -148,3 +148,114 @@ Pendant le job, l'interface Spark est sur http://localhost:4040.
 | Pourquoi recalculer tout à chaque fois ? | Idempotent et simple ; à 450k événements c'est quelques secondes. `MERGE` incrémental quand le volume l'exige. |
 | Comment gères-tu les deletes CDC ? | L'événement `d` porte l'image `before` ; si c'est la dernière version de la clé, la ligne disparaît du silver. |
 | Comment sais-tu que ton silver est juste ? | Je re-vérifie les invariants comptables du système source sur le lakehouse. |
+
+---
+
+# Phase 3b — Détection de fraude en temps réel (Spark Structured Streaming)
+
+## 9. Le motif de fraude à attraper
+
+Le générateur simule une **prise de contrôle de compte** (le motif de PaySim) :
+
+```
+ victime ──TRANSFER (presque tout son solde)──▶ mule ──CASH_OUT (presque tout, 2 à 30 min après)──▶ agent
+```
+
+| Idée de règle | Est-ce qu'elle attrape la mule ? |
+|---|---|
+| « Trop de transactions en 10 min » (vélocité) | ❌ La mule ne fait que **2** opérations |
+| « Montant très élevé » | ❌ Une victime peut avoir un petit solde |
+| **« L'argent entre puis ressort en cash presque en entier, très vite »** | ✅ C'est **le lien** entre les deux opérations |
+
+Ce lien est une **jointure entre deux événements du même flux**, sur le compte de la mule, limitée dans le temps.
+
+## 10. Le workflow du job `lake fraud`
+
+```
+ Kafka: kaarangepay.public.transactions
+          │  (JSON Debezium)
+          ▼
+ décoder l'enveloppe ──────────── même code que le silver (cdc.parse_changes)
+          │
+          ▼
+ event time = occurred_at + watermark 45 min
+          │
+          ├──▶ entrées : TRANSFER complétés ≥ 5 000 XOF    (compte = destinataire)
+          ├──▶ sorties : CASH_OUT complétés                  (compte = émetteur)
+          ▼
+ JOINTURE stream-stream : même compte
+                          ET cash-out entre 0 et 30 min après le transfert
+                          ET cash-out entre 90 % et 100 % du montant reçu
+          │
+          ├──▶ topic Kafka kaarangepay.fraud.alerts   (pour réagir en temps réel)
+          └──▶ table Delta gold/fraud_alerts           (pour analyser et mesurer)
+               chaque sortie a son checkpoint sur S3
+```
+
+## 11. Event time, watermark, état : les 3 notions clés du streaming
+
+| Notion | Définition simple | Chez nous |
+|---|---|---|
+| **Event time** | L'heure où l'événement s'est **produit** (pas l'heure où on le reçoit) | `occurred_at` (ADR 0004 de la phase 1 !) |
+| **État** | Ce que Spark doit garder en mémoire entre deux micro-batchs | Les TRANSFER récents qui attendent peut-être leur CASH_OUT |
+| **Watermark** | « Je n'attends plus d'événements plus vieux que *max vu − délai* » | 45 min : au-delà, Spark **oublie** les vieux transferts → mémoire bornée |
+
+**Sans watermark**, Spark garderait *tous* les transferts depuis le début pour toujours : la mémoire exploserait.
+
+**Pourquoi 45 min et pas 10 ?** En backfill, le générateur envoie le cash-out de la mule juste après le transfert,
+mais **daté jusqu'à 30 min plus tard**. Le « max vu » avance donc d'un coup de 30 min. Avec un watermark de 10 min,
+les transactions normales suivantes (datées normalement) seraient jugées « en retard » et **jetées**.
+45 min = 30 min d'avance possible + une marge.
+
+## 12. Checkpoint et garanties
+
+Le **checkpoint** (`s3a://gold/_checkpoints/...`) contient : les offsets Kafka lus, l'état de la jointure, les
+micro-batchs validés. Après un arrêt, `lake fraud` reprend **exactement** là où il s'était arrêté.
+
+| Sortie | Garantie | Pourquoi |
+|---|---|---|
+| Table Delta | **Exactly once** | Delta note quels micro-batchs sont déjà écrits |
+| Topic Kafka | **At least once** | Un doublon est possible après un plantage → `alert_id` = id du cash-out, déterministe, pour dédoublonner |
+
+C'est la même logique que le bronze-writer : on accepte la relivraison, et on rend son effet inoffensif.
+
+## 13. Mesurer au lieu d'affirmer : précision et rappel
+
+Le générateur écrit la **vérité terrain** dans `data/labels/fraud_labels.jsonl` (l'API ne la voit jamais).
+`lake fraud-eval` compare les alertes à ces labels :
+
+| Mesure | Question | Formule |
+|---|---|---|
+| **Précision** | Quand on alerte, a-t-on raison ? | vraies fraudes signalées / transactions signalées |
+| **Rappel** | Attrape-t-on les fraudes ? | vraies fraudes signalées / toutes les fraudes |
+| Cas détectés | Combien de prises de contrôle repérées ? | transferts frauduleux signalés / transferts frauduleux |
+
+Compromis classique : baisser le seuil (par ex. 80 % au lieu de 90 %) augmente le rappel mais baisse la précision.
+**Faux positifs attendus :** un client honnête qui reçoit de l'argent d'un proche et le retire aussitôt en entier
+ressemble à une mule. Ce n'est pas un bug, c'est la limite d'une règle sans contexte → phase 5 (ML).
+
+## 14. Lancer la phase 3b
+
+```bat
+set COMPOSE_PROFILES=cdc,bronze,lake
+docker compose build lake
+docker compose run --rm lake fraud
+docker compose run --rm lake fraud-eval
+```
+
+- `lake fraud` lit **tout** le topic depuis le début, écrit les alertes, puis s'arrête (`availableNow`).
+- `lake fraud --continuous` reste allumé (un micro-batch toutes les 10 s) : lance le trafic live à côté et regarde
+  les alertes arriver dans Kafka UI (http://localhost:8090, topic `kaarangepay.fraud.alerts`).
+- Relancer `lake fraud` ne re-traite rien : le checkpoint sait où il en est.
+- Interface Spark pendant un job : `docker compose run --rm --service-ports lake fraud --continuous` puis http://localhost:4040
+  (onglet *Structured Streaming* : débit, latence de chaque micro-batch).
+
+## 15. Ce que tu dois savoir expliquer
+
+| Question | Réponse courte |
+|---|---|
+| Batch vs streaming ? | Même code (fonction pure sur DataFrame). En streaming, Spark garde un état entre micro-batchs. |
+| Pourquoi un watermark ? | Pour borner l'état : sans lui, la mémoire grandit à l'infini. |
+| Event time vs processing time ? | On raisonne sur l'heure réelle de l'opération ; le retard du réseau ne doit pas changer le résultat. |
+| Exactly once ? | Oui vers Delta ; at-least-once vers Kafka, rendu inoffensif par une clé déterministe. |
+| Ta règle est-elle bonne ? | Je ne l'affirme pas, je la mesure : précision et rappel contre des labels. |
