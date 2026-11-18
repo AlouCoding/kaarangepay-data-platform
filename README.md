@@ -1,5 +1,7 @@
 # KaaranguéPay — Mobile Money Data Platform
 
+[![CI](https://github.com/AlouCoding/kaarangepay-data-platform/actions/workflows/ci.yml/badge.svg)](https://github.com/AlouCoding/kaarangepay-data-platform/actions/workflows/ci.yml)
+
 > *Kaaraange* means **security / protection** in Wolof: the first promise of a payment system.
 
 An end-to-end **data engineering** project built around a realistic mobile money
@@ -95,14 +97,28 @@ The generator models a non-homogeneous Poisson process (Lewis-Shedler thinning) 
 
 ## Quick start
 
-Requirements: Docker, plus Java 21 + Maven and Python 3.11+ to run the tests locally.
+Only **Docker** is required (Java, Maven and Python run inside containers).
 
 ```bash
-make up          # Postgres + payment-core on http://localhost:8080
-make backfill    # 30 days of history for November 2026
-make integrity   # check the ledger invariants
-make psql        # explore the data
+# 1. Start Postgres + payment-core on http://localhost:8080
+docker compose up -d --build postgres payment-core
+
+# 2. Generate 30 days of history (November 2026)
+docker compose --profile traffic run --rm traffic-generator \
+  --base-url http://payment-core:8080 --rate 300 backfill --start 2026-11-01 --days 30
+
+# 3. Check the ledger invariants
+curl http://localhost:8080/api/v1/ledger/integrity
+
+# 4. Explore the data
+docker compose exec postgres psql -U mmplatform -d mmplatform
 ```
+
+With `make` installed (Linux/macOS): `make up`, `make backfill`, `make integrity`, `make psql`.
+If port 8080 is taken, set `APP_PORT` (e.g. `APP_PORT=8082`).
+
+> On a run of 30 simulated days on a laptop: **134,335 API calls at ~205 tx/s**,
+> 1,329 idempotent replays, and the ledger invariants still at zero.
 
 Example API calls:
 
@@ -130,8 +146,17 @@ Metrics are exposed for Prometheus on `/actuator/prometheus` (`mm_transactions_t
 ## Tests
 
 ```bash
-make test
+# Java tests in a Maven container (Testcontainers starts a throwaway PostgreSQL)
+cd payment-core
+docker run --rm -v "$PWD:/app" -w /app -v m2cache:/root/.m2 \
+  -v /var/run/docker.sock:/var/run/docker.sock \
+  -e TESTCONTAINERS_HOST_OVERRIDE=host.docker.internal \
+  maven:3.9-eclipse-temurin-21 mvn -B verify
 ```
+(On Windows `cmd`, replace `$PWD` with `%cd%` and put the command on one line.
+With Java 21 + Maven installed: `mvn verify`, or `make test` for everything.)
+
+**26 tests, all green:**
 
 - **payment-core**: unit tests (fees, routing, hashing, clock) and integration tests
   against a real PostgreSQL with **Testcontainers**: money flows, failures, idempotent
@@ -139,6 +164,10 @@ make test
   concurrent retries. Every API test ends with a ledger integrity check.
 - **traffic-generator**: `pytest`, `ruff`, `mypy --strict`. It is tested against an
   in-memory fake that applies the same business rules.
+
+The concurrency test fires 10 identical requests at the same time: PostgreSQL rejects 9 of them on the
+`UNIQUE` idempotency key and the service replays the first result. **Exactly-once is enforced by the
+database, not by an `if` in Java code.**
 
 CI runs both on every push (GitHub Actions).
 
@@ -149,6 +178,8 @@ CI runs both on every push (GitHub Actions).
 │   └── src/main/resources/db/migration   Flyway migrations
 ├── traffic-generator/     Python package `mmgen`
 ├── docs/adr/              Architecture Decision Records
+├── docs/GUIDE-FR.md       Walkthrough with workflow diagrams (French)
+├── docs/JOURNAL-FR.md     Engineering log: issues, root causes, fixes (French)
 ├── docker-compose.yml
 └── Makefile
 ```
@@ -158,3 +189,5 @@ CI runs both on every push (GitHub Actions).
 - The FEES and TREASURY rows are hot spots under very high load (see ADR 0002).
 - No authentication yet: the API is meant to run on a private network in this project.
 - `X-Simulated-Time` exists for backfills only and is disabled by default.
+- The traffic generator currently over-drains customer wallets (16–31 % refused payments);
+  rebalancing money flows is the next fix (v1.1). See the engineering log.
