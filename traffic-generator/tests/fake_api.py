@@ -6,7 +6,7 @@ import threading
 import uuid
 from datetime import datetime
 
-from mmgen.client import TREASURY_ID, TxResult
+from mmgen.client import TREASURY_ID, PhoneAlreadyUsedError, TxResult
 
 FEE_BPS = {"TRANSFER": 100, "CASH_OUT": 50}
 MAX_FEE = 5_000
@@ -18,11 +18,15 @@ class FakePaymentApi:
         self.types: dict[str, str] = {TREASURY_ID: "SYSTEM"}
         self.by_key: dict[str, tuple[tuple[object, ...], TxResult]] = {}
         self.occurred_at: dict[str, datetime | None] = {}
+        self.phones: set[str] = set()
         self._lock = threading.Lock()
 
     def open_account(self, phone: str, owner_name: str, account_type: str) -> str:
         account_id = str(uuid.uuid4())
         with self._lock:
+            if phone in self.phones:  # same UNIQUE constraint as payment-core
+                raise PhoneAlreadyUsedError(phone)
+            self.phones.add(phone)
             self.balances[account_id] = 0
             self.types[account_id] = account_type
         return account_id

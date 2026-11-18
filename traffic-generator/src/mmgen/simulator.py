@@ -22,7 +22,7 @@ from collections import Counter
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta
 
-from mmgen.client import TREASURY_ID, PaymentApi, TxResult
+from mmgen.client import TREASURY_ID, PaymentApi, PhoneAlreadyUsedError, TxResult
 from mmgen.labels import LabelSink
 from mmgen.patterns import is_payday_period
 
@@ -51,6 +51,7 @@ OVERSPEND_RATE = 0.03          # share of outgoing payments attempted above the 
 SALARY_RATE = 0.12             # extra salary deposits per event during the payday period
 MERCHANT_CASH_OUT_RATE = 0.03  # merchants withdrawing their takings, per event
 MERCHANT_CASH_OUT_MIN_BALANCE = 20_000
+MAX_PHONE_ATTEMPTS = 1_000
 
 # Mirror of payment-core's fee schedule (application.yml): needed to estimate balances.
 FEE_BPS: dict[str, int] = {"TRANSFER": 100, "CASH_OUT": 50}
@@ -203,13 +204,23 @@ def build_population(
         previous_midnight = start.replace(hour=0, minute=0, second=0, microsecond=0) - timedelta(days=1)
         return previous_midnight + timedelta(hours=rng.uniform(first_hour, last_hour))
 
+    def open_account(owner: str, account_type: str) -> str:
+        """The database may already hold accounts from an earlier run (same seed, same numbers):
+        a taken number is simply replaced by a new one, like an operator would do."""
+        for _ in range(MAX_PHONE_ATTEMPTS):
+            try:
+                return api.open_account(phones.new(), owner, account_type)
+            except PhoneAlreadyUsedError:
+                continue
+        raise RuntimeError(f"No free phone number after {MAX_PHONE_ATTEMPTS} attempts")
+
     def submit(tx_type: str, source: str, destination: str, amount: int, ts: datetime | None) -> None:
         result = api.submit(_key(), tx_type, source, destination, amount, ts)
         book.apply(tx_type, source, destination, amount, result)
 
-    agents = [api.open_account(phones.new(), f"Agent {name()}", "AGENT") for _ in range(n_agents)]
-    merchants = [api.open_account(phones.new(), f"Boutique {name()}", "MERCHANT") for _ in range(n_merchants)]
-    customers = [api.open_account(phones.new(), name(), "CUSTOMER") for _ in range(n_customers)]
+    agents = [open_account(f"Agent {name()}", "AGENT") for _ in range(n_agents)]
+    merchants = [open_account(f"Boutique {name()}", "MERCHANT") for _ in range(n_merchants)]
+    customers = [open_account(name(), "CUSTOMER") for _ in range(n_customers)]
 
     for agent in agents:
         submit("FLOAT_TOPUP", TREASURY_ID, agent, AGENT_TOPUP_AMOUNT, onboarding_time(6, 7))

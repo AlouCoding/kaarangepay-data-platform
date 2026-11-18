@@ -14,6 +14,10 @@ import httpx
 TREASURY_ID = "00000000-0000-0000-0000-000000000001"
 
 
+class PhoneAlreadyUsedError(Exception):
+    """The phone number already has an account (payment-core enforces UNIQUE on phone)."""
+
+
 @dataclass(frozen=True)
 class TxResult:
     """Outcome of a POST /transactions call."""
@@ -68,6 +72,8 @@ class HttpPaymentApi:
     def open_account(self, phone: str, owner_name: str, account_type: str) -> str:
         payload = {"phone": phone, "ownerName": owner_name, "type": account_type}
         response = self._request("POST", "/api/v1/accounts", json=payload)
+        if response.status_code == 422 and "already exists" in response.text:
+            raise PhoneAlreadyUsedError(phone)
         response.raise_for_status()
         return str(response.json()["id"])
 

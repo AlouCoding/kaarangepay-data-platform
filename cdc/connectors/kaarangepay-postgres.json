@@ -1,0 +1,28 @@
+{
+  "connector.class": "io.debezium.connector.postgresql.PostgresConnector",
+  "tasks.max": "1",
+
+  "database.hostname": "postgres",
+  "database.port": "5432",
+  "database.user": "mmplatform",
+  "database.password": "mmplatform",
+  "database.dbname": "mmplatform",
+
+  "plugin.name": "pgoutput",
+  "slot.name": "kaarangepay_slot",
+  "publication.name": "kaarangepay_cdc",
+  "publication.autocreate.mode": "filtered",
+  "table.include.list": "public.accounts,public.transactions,public.ledger_entries",
+
+  "topic.prefix": "kaarangepay",
+  "topic.creation.default.replication.factor": "1",
+  "topic.creation.default.partitions": "3",
+
+  "snapshot.mode": "initial",
+  "heartbeat.interval.ms": "10000",
+
+  "key.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "key.converter.schemas.enable": "false",
+  "value.converter": "org.apache.kafka.connect.json.JsonConverter",
+  "value.converter.schemas.enable": "false"
+}

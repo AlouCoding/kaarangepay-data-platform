@@ -1,8 +1,9 @@
 from datetime import UTC, datetime
 
 import httpx
+import pytest
 
-from mmgen.client import HttpPaymentApi
+from mmgen.client import HttpPaymentApi, PhoneAlreadyUsedError
 
 
 def test_retries_server_errors_with_the_same_idempotency_key() -> None:
@@ -43,3 +44,12 @@ def test_sends_simulated_time_and_reads_failures() -> None:
     assert result.status == "FAILED"
     assert result.failure_reason == "INSUFFICIENT_FUNDS"
     assert result.replayed
+
+
+def test_duplicate_phone_is_reported_as_a_specific_error() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(422, json={"detail": "An account already exists for phone +221770000000"})
+
+    api = HttpPaymentApi("http://test", transport=httpx.MockTransport(handler))
+    with pytest.raises(PhoneAlreadyUsedError):
+        api.open_account("+221770000000", "Awa", "CUSTOMER")

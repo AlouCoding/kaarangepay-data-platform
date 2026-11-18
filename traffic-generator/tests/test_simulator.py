@@ -142,3 +142,13 @@ def test_onboarding_happens_the_day_before_the_window() -> None:
     day_before = TS.replace(hour=0) - timedelta(days=1)
     assert all(day_before <= t < day_before + timedelta(days=1) for t in times)
     assert all(6 <= t.hour < 21 for t in times)
+
+
+def test_a_second_run_on_the_same_database_gets_new_phone_numbers() -> None:
+    """Bug found in phase 2a: `live` after `backfill` reused seed 42, hence the same phone
+    numbers, and payment-core rightly refused the duplicates (422)."""
+    api = FakePaymentApi()
+    first = build_population(api, random.Random(42), n_customers=50, n_merchants=5, n_agents=3, start=TS)
+    second = build_population(api, random.Random(42), n_customers=50, n_merchants=5, n_agents=3, start=None)
+    assert set(first.customers).isdisjoint(second.customers)
+    assert len(api.phones) == 2 * (50 + 5 + 3)

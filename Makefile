@@ -1,4 +1,4 @@
-.PHONY: help up down reset logs test test-java test-python backfill live integrity psql
+.PHONY: help up down reset logs test test-java test-python backfill live integrity psql cdc-up cdc-status cdc-topics cdc-down
 
 help:            ## Show this help
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -36,3 +36,17 @@ integrity:       ## Check the three ledger invariants
 
 psql:            ## Open a SQL shell on the database
 	docker compose exec postgres psql -U mmplatform -d mmplatform
+
+cdc-up:          ## Phase 2a: start Kafka + Debezium + Kafka UI (http://localhost:8090)
+	docker compose --profile cdc up -d
+
+cdc-status:      ## Debezium connector status
+	@curl -s http://localhost:8083/connectors/kaarangepay-postgres/status; echo
+
+cdc-topics:      ## List Kafka topics
+	docker compose exec kafka /opt/kafka/bin/kafka-topics.sh --bootstrap-server kafka:9092 --list
+
+cdc-down:        ## Stop CDC for a long time: delete connector, drop replication slot, stop services
+	-curl -s -X DELETE http://localhost:8083/connectors/kaarangepay-postgres
+	-docker compose exec postgres psql -U mmplatform -d mmplatform -c "SELECT pg_drop_replication_slot('kaarangepay_slot');"
+	docker compose --profile cdc stop
