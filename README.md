@@ -11,7 +11,7 @@ A transactional core produces correct, realistic payment data: double-entry ledg
 idempotent API, fraud scenarios, paydays and holiday peaks. On top of it, a data
 platform captures, streams, models and checks that data (phases 2–5).
 
-> **Status: Phase 1 — transactional source** ✅
+> **Status: Phase 1 — transactional source** ✅ · **Phase 2a — CDC with Debezium + Kafka** ✅
 > KaaranguéPay is a fictional brand. Fee rules, traffic patterns and amounts are illustrative
 > assumptions, not data from any real operator.
 
@@ -35,7 +35,8 @@ flowchart LR
 | Phase | Scope | Status |
 |---|---|---|
 | 1. Source | payment-core, double-entry ledger, idempotency, traffic generator, CI | ✅ |
-| 2. Ingestion | Debezium CDC → Kafka (Avro + Schema Registry), bronze layer on MinIO | ⏳ |
+| 2a. CDC | Debezium reads PostgreSQL's WAL → one Kafka topic per table, Kafka UI, reconciliation | ✅ |
+| 2b. Bronze | Avro + Schema Registry, raw CDC events landed on MinIO | ⏳ |
 | 3. Streaming | Spark Structured Streaming: silver/gold, real-time fraud features | ⏳ |
 | 4. Batch & BI | Airflow + dbt star schema, data quality tests, reconciliation, Superset | ⏳ |
 | 5. ML & polish | Fraud model with MLflow, observability, Kubernetes, demo video | ⏳ |
@@ -57,6 +58,7 @@ Each decision is documented as an [ADR](docs/adr). A French walkthrough with wor
 | [0003](docs/adr/0003-idempotency-keys.md) | Mandatory idempotency keys: a retried request never debits twice |
 | [0004](docs/adr/0004-event-time-vs-processing-time.md) | Event time vs processing time, with a dev-only simulated clock for backfills |
 | [0005](docs/adr/0005-integer-amounts-in-xof.md) | Integer amounts in XOF, fees in basis points |
+| [0006](docs/adr/0006-change-data-capture-with-debezium.md) | Log-based CDC with Debezium instead of polling or dual writes |
 
 ### Concurrency
 Accounts are locked with `SELECT … FOR UPDATE` **in a global id order**, so concurrent
@@ -71,6 +73,22 @@ curl localhost:8080/api/v1/ledger/integrity
 ```
 The same three invariants will be re-checked in the warehouse with dbt tests (phase 4).
 Comparing both sides is a real OLTP ↔ analytics reconciliation.
+
+## Change Data Capture (phase 2a)
+
+```bash
+docker compose --profile cdc up -d     # Kafka (KRaft) + Debezium + Kafka UI on http://localhost:8090
+curl http://localhost:8083/connectors/kaarangepay-postgres/status
+```
+
+Debezium reads PostgreSQL's write-ahead log and publishes every committed change to
+`kaarangepay.public.{accounts,transactions,ledger_entries}`, keyed by primary key so that all
+changes of a row stay ordered. `transactions` and `ledger_entries` are insert-only, so the
+pipeline is reconciled with a simple rule: **messages in the topic = rows in the table**.
+
+Measured on a laptop: initial snapshot of the whole database in **~18 s**, then live streaming;
+**133,845 transactions and 309,668 ledger entries in Kafka, exactly matching PostgreSQL (0 gap)**.
+Walkthrough (French): [docs/GUIDE-PHASE2-FR.md](docs/GUIDE-PHASE2-FR.md).
 
 ## Data model
 
@@ -181,6 +199,7 @@ CI runs both on every push (GitHub Actions).
 ├── payment-core/          Spring Boot service (account, ledger, transaction modules)
 │   └── src/main/resources/db/migration   Flyway migrations
 ├── traffic-generator/     Python package `mmgen`
+├── cdc/connectors/        Debezium connector configuration
 ├── docs/adr/              Architecture Decision Records
 ├── docs/GUIDE-FR.md       Walkthrough with workflow diagrams (French)
 ├── docs/JOURNAL-FR.md     Engineering log: issues, root causes, fixes (French)
