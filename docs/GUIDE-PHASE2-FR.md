@@ -236,3 +236,158 @@ C'est une vraie question d'entretien : *« Que se passe-t-il si votre connecteur
 | Offset | La position d'un message dans une partition |
 | KRaft | Mode de Kafka sans ZooKeeper : Kafka gère lui-même son cluster |
 | Kafka Connect | Le cadre qui fait tourner des connecteurs (ici Debezium) |
+
+---
+
+# Partie 2b — La couche bronze : garder chaque événement, pour toujours
+
+> Objectif : copier **tous les messages Kafka** dans des fichiers **Parquet** sur un stockage
+> compatible S3, **sans perte ni doublon**, même si le programme plante au mauvais moment.
+
+## 11. Pourquoi une couche « bronze » ?
+
+Kafka garde les messages **7 jours** (notre réglage). Pour pouvoir **tout reconstruire** plus tard
+(analyses, modèles ML, corrections), on archive chaque événement **brut, sans le modifier**.
+
+| Couche | Contenu | Règle |
+|---|---|---|
+| **Bronze** (maintenant) | Les événements tels quels | On n'interprète rien, on ne jette rien |
+| Silver (plus tard) | Données nettoyées, dédoublonnées, typées | On corrige |
+| Gold (plus tard) | Tables prêtes pour l'analyse (KPIs) | On agrège |
+
+C'est l'architecture **médaillon** (*medallion architecture*), standard dans les data lakes.
+
+## 12. Vue d'ensemble
+
+```mermaid
+flowchart LR
+    K["Kafka<br/>3 topics"] -->|"poll"| W["bronze-writer<br/>(Python)"]
+    W -->|"1. écrit le fichier Parquet"| S[("SeaweedFS<br/>bucket bronze")]
+    W -->|"2. puis valide l'offset"| K
+```
+
+| Service | Rôle | Port |
+|---|---|---|
+| `seaweedfs` | Stockage objet compatible S3 (remplace MinIO, voir ADR 0007) | 8333 (S3), **8888** (navigateur de fichiers) |
+| `bronze-writer` | Notre consommateur Kafka : regroupe, écrit, puis valide | — |
+
+**Pourquoi pas MinIO ?** MinIO a arrêté de publier ses images Docker gratuites en octobre 2025.
+SeaweedFS parle le même langage (l'API S3) : notre code marcherait aussi avec AWS S3.
+
+## 13. Le cœur du sujet : écrire PUIS valider l'offset
+
+Un consommateur Kafka retient **où il en est** dans chaque partition : son **offset**. La question
+qui fait la différence entre un débutant et un ingénieur : **quand** valider cet offset ?
+
+```mermaid
+sequenceDiagram
+    participant K as Kafka
+    participant W as bronze-writer
+    participant S as SeaweedFS
+    W->>K: lit les messages 0 à 4 999 (partition 2)
+    W->>W: les regroupe en un lot
+    W->>S: 1. écrit offset=000000000000.parquet
+    S-->>W: OK
+    W->>K: 2. valide l'offset 5 000 (« j'ai tout traité jusqu'ici »)
+```
+
+| Ordre | Si le programme plante entre les deux | Résultat |
+|---|---|---|
+| Valider **puis** écrire | Offset validé, fichier jamais écrit | ❌ **Perte** de données |
+| **Écrire puis valider** ✅ | Fichier écrit, offset pas validé | Les messages seront relus… risque de **doublon** ? |
+
+**Le doublon est évité par le nom du fichier.** Il dépend uniquement du **premier offset** du lot.
+Au redémarrage, le writer repart du dernier offset validé, reconstruit un lot qui commence **au même
+offset**, donc **réécrit le même fichier** au lieu d'en créer un deuxième.
+
+```mermaid
+flowchart LR
+    A["Lot 0-4999 écrit<br/>offset=000000000000.parquet"] --> B["💥 crash<br/>avant validation"]
+    B --> C["Redémarrage :<br/>relit depuis 0"]
+    C --> D["Réécrit<br/>offset=000000000000.parquet<br/>(même nom → écrasé)"]
+    D --> E["Valide 5000 ✅<br/>aucune perte, aucun doublon"]
+```
+
+C'est ce qu'on appelle un effet **exactly-once** obtenu avec une livraison **at-least-once** et
+une écriture **idempotente**. Ce scénario exact est un test automatique
+(`test_crash_between_write_and_commit_rewrites_the_same_object`).
+
+## 14. Pourquoi Parquet ?
+
+| | JSON (une ligne par message) | **Parquet** |
+|---|---|---|
+| Stockage | Ligne par ligne, texte | **Par colonne**, compressé (zstd) |
+| Taille | Gros | Souvent 5 à 10 fois plus petit |
+| Lire une seule colonne | Il faut tout lire | On ne lit que cette colonne |
+| Lu par | Tout | Spark, DuckDB, pandas, Power BI… |
+
+## 15. Organisation des fichiers
+
+```
+bronze/
+└── transactions/
+    └── dt=2026-11-18/              ← jour du premier événement du lot
+        ├── partition=0/
+        │   ├── offset=000000000000.parquet
+        │   └── offset=000000005000.parquet
+        ├── partition=1/ …
+        └── partition=2/ …
+```
+
+Chaque ligne d'un fichier contient : les coordonnées Kafka (topic, partition, offset, horodatage,
+clé), quelques champs extraits de l'enveloppe Debezium (`op`, table, LSN, transaction) et
+**le message brut complet**, intact.
+
+## 16. Démarrer (Windows)
+
+### 16.1 Télécharger (~150 Mo au total)
+```bat
+docker pull chrislusf/seaweedfs:latest
+```
+L'image du `bronze-writer` est construite chez toi (Python + `confluent-kafka`, `pyarrow`, `boto3`).
+
+### 16.2 Lancer (Kafka et Debezium doivent tourner)
+Le `bronze-writer` dépend de Kafka (profil `cdc`) : il faut **toujours activer les deux profils**,
+sinon Compose répond `depends on undefined service "kafka"`. Le plus simple, une fois par terminal :
+```bat
+set COMPOSE_PROFILES=cdc,bronze
+docker compose up -d --build
+docker compose logs -f bronze-writer
+```
+Tu dois voir défiler des lignes `wrote transactions/dt=…/offset=….parquet (5000 rows …)`.
+Le premier passage relit **tout** l'historique de Kafka (~440 000 messages + les comptes).
+
+### 16.3 Voir les fichiers
+Navigateur : **http://localhost:8888/buckets/bronze/**
+
+### 16.4 Réconciliation de la couche bronze
+```bat
+docker compose --profile cdc --profile bronze run --rm bronze-writer reconcile
+```
+Pour chaque table et chaque partition : nombre de lignes, plage d'offsets, **doublons = 0** et
+**trous = 0**. Les totaux de `transactions` et `ledger_entries` doivent être égaux aux comptages
+PostgreSQL et Kafka de la partie 2a.
+
+## 17. Questions d'entretien
+
+| Question | Réponse courte |
+|---|---|
+| Quand validez-vous l'offset Kafka ? | Après l'écriture du fichier, jamais avant : sinon un crash perd des données. |
+| Et les doublons après un crash ? | Nom de fichier déterministe (premier offset du lot) : le fichier est réécrit, pas dupliqué. |
+| Pourquoi pas l'auto-commit ? | Il valide sur un minuteur, sans savoir si les données sont réellement stockées. |
+| Pourquoi garder le message brut ? | Bronze doit permettre de tout reconstruire ; on interprète en silver. |
+| Comment prouvez-vous que rien ne manque ? | Par partition, offsets contigus sans trou ni doublon, puis égalité avec PostgreSQL. |
+
+## 18. Glossaire (2b)
+
+| Terme | Définition simple |
+|---|---|
+| Consommateur (consumer) | Programme qui lit les messages d'un topic Kafka |
+| Groupe de consommateurs | Plusieurs instances qui se partagent les partitions ; Kafka retient leur position commune |
+| Offset validé (commit) | La position enregistrée « j'ai traité jusqu'ici » |
+| At-least-once | Chaque message est traité au moins une fois (doublons possibles) |
+| Idempotent | Refaire l'opération donne le même résultat (ici : même nom de fichier) |
+| Exactly-once (effet) | Le résultat final contient chaque message une seule fois |
+| Parquet | Format de fichier en colonnes, compressé, standard des data lakes |
+| Architecture médaillon | Bronze (brut) → Silver (nettoyé) → Gold (agrégé) |
+| S3 | L'API de stockage objet d'AWS, devenue un standard (SeaweedFS la parle aussi) |

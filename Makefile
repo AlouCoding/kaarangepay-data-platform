@@ -1,4 +1,4 @@
-.PHONY: help up down reset logs test test-java test-python backfill live integrity psql cdc-up cdc-status cdc-topics cdc-down
+.PHONY: help up down reset logs test test-java test-python backfill live integrity psql cdc-up cdc-status cdc-topics cdc-down bronze-up bronze-reconcile
 
 help:            ## Show this help
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -20,8 +20,9 @@ test: test-java test-python  ## Run all tests
 test-java:       ## Unit + integration tests (needs Docker for Testcontainers)
 	cd payment-core && mvn -B verify
 
-test-python:     ## Lint, type-check and test the generator
+test-python:     ## Lint, type-check and test the Python services
 	cd traffic-generator && ruff check src tests && mypy src && pytest -q
+	cd bronze-writer && ruff check src tests && mypy src && pytest -q
 
 backfill:        ## Generate 30 days of history (Nov 2026) with simulated event times
 	mkdir -p data
@@ -50,3 +51,9 @@ cdc-down:        ## Stop CDC for a long time: delete connector, drop replication
 	-curl -s -X DELETE http://localhost:8083/connectors/kaarangepay-postgres
 	-docker compose exec postgres psql -U mmplatform -d mmplatform -c "SELECT pg_drop_replication_slot('kaarangepay_slot');"
 	docker compose --profile cdc stop
+
+bronze-up:       ## Phase 2b: start SeaweedFS + bronze-writer (needs the cdc profile)
+	docker compose --profile cdc --profile bronze up -d --build
+
+bronze-reconcile: ## Check the bronze layer: offsets contiguous, no duplicates
+	docker compose --profile cdc --profile bronze run --rm bronze-writer reconcile

@@ -11,7 +11,7 @@ A transactional core produces correct, realistic payment data: double-entry ledg
 idempotent API, fraud scenarios, paydays and holiday peaks. On top of it, a data
 platform captures, streams, models and checks that data (phases 2–5).
 
-> **Status: Phase 1 — transactional source** ✅ · **Phase 2a — CDC with Debezium + Kafka** ✅
+> **Status: Phase 1 — transactional source** ✅ · **Phase 2a — CDC with Debezium + Kafka** ✅ · **Phase 2b — bronze layer** ✅
 > KaaranguéPay is a fictional brand. Fee rules, traffic patterns and amounts are illustrative
 > assumptions, not data from any real operator.
 
@@ -36,7 +36,7 @@ flowchart LR
 |---|---|---|
 | 1. Source | payment-core, double-entry ledger, idempotency, traffic generator, CI | ✅ |
 | 2a. CDC | Debezium reads PostgreSQL's WAL → one Kafka topic per table, Kafka UI, reconciliation | ✅ |
-| 2b. Bronze | Avro + Schema Registry, raw CDC events landed on MinIO | ⏳ |
+| 2b. Bronze | Own Kafka consumer → raw CDC events as Parquet on S3-compatible storage (SeaweedFS), exactly-once effect | ✅ |
 | 3. Streaming | Spark Structured Streaming: silver/gold, real-time fraud features | ⏳ |
 | 4. Batch & BI | Airflow + dbt star schema, data quality tests, reconciliation, Superset | ⏳ |
 | 5. ML & polish | Fraud model with MLflow, observability, Kubernetes, demo video | ⏳ |
@@ -59,6 +59,7 @@ Each decision is documented as an [ADR](docs/adr). A French walkthrough with wor
 | [0004](docs/adr/0004-event-time-vs-processing-time.md) | Event time vs processing time, with a dev-only simulated clock for backfills |
 | [0005](docs/adr/0005-integer-amounts-in-xof.md) | Integer amounts in XOF, fees in basis points |
 | [0006](docs/adr/0006-change-data-capture-with-debezium.md) | Log-based CDC with Debezium instead of polling or dual writes |
+| [0007](docs/adr/0007-bronze-layer-writer.md) | Bronze layer: own consumer, write-then-commit, deterministic file keys, SeaweedFS instead of MinIO |
 
 ### Concurrency
 Accounts are locked with `SELECT … FOR UPDATE` **in a global id order**, so concurrent
@@ -89,6 +90,30 @@ pipeline is reconciled with a simple rule: **messages in the topic = rows in the
 Measured on a laptop: initial snapshot of the whole database in **~18 s**, then live streaming;
 **133,845 transactions and 309,668 ledger entries in Kafka, exactly matching PostgreSQL (0 gap)**.
 Walkthrough (French): [docs/GUIDE-PHASE2-FR.md](docs/GUIDE-PHASE2-FR.md).
+
+## Bronze layer (phase 2b)
+
+```bash
+docker compose --profile cdc --profile bronze up -d --build   # SeaweedFS + bronze-writer
+docker compose --profile cdc --profile bronze run --rm bronze-writer reconcile
+```
+
+`bronze-writer` is a small Python consumer: it batches events **per partition**, writes a Parquet
+file, and commits the Kafka offset **only after** the write. File keys depend only on the batch's
+first offset (`transactions/dt=…/partition=2/offset=000000044794.parquet`), so a crash between write
+and commit leads to an **overwrite, not a duplicate**: exactly-once effect on top of at-least-once
+delivery. The reconcile command proves it: per partition, offsets are contiguous, with no gap and no
+duplicate.
+
+Measured result (first full run):
+
+| Table | Rows in Parquet | Files | Rows in PostgreSQL | Gaps | Duplicates |
+|---|---|---|---|---|---|
+| `transactions` | 133,845 | 27 | 133,845 | 0 | 0 |
+| `ledger_entries` | 309,668 | 63 | 309,668 | 0 | 0 |
+| `accounts` (change events) | 2,172 | 3 | — | 0 | 0 |
+
+The end-to-end chain **PostgreSQL → Debezium → Kafka → Parquet** loses nothing and duplicates nothing.
 
 ## Data model
 
@@ -199,6 +224,7 @@ CI runs both on every push (GitHub Actions).
 ├── payment-core/          Spring Boot service (account, ledger, transaction modules)
 │   └── src/main/resources/db/migration   Flyway migrations
 ├── traffic-generator/     Python package `mmgen`
+├── bronze-writer/         Kafka → Parquet → S3 consumer (phase 2b)
 ├── cdc/connectors/        Debezium connector configuration
 ├── docs/adr/              Architecture Decision Records
 ├── docs/GUIDE-FR.md       Walkthrough with workflow diagrams (French)

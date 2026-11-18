@@ -145,6 +145,43 @@ services:
       kafka:
         condition: service_healthy
 
+  # ===========================================================================
+  # Phase 2b — Bronze layer: raw CDC events -> Parquet files on S3-compatible storage
+  # Started with:  docker compose --profile cdc --profile bronze up -d
+  # See docs/adr/0007 and docs/GUIDE-PHASE2-FR.md (part 2b)
+  # ===========================================================================
+
+  # S3-compatible object storage (MinIO stopped publishing free images in Oct. 2025).
+  # S3 API on :8333, file browser on http://localhost:8888
+  seaweedfs:
+    image: chrislusf/seaweedfs:latest
+    profiles: ["bronze"]
+    command: ["server", "-dir=/data", "-s3", "-s3.port=8333"]
+    ports:
+      - "8333:8333"
+      - "8888:8888"
+    volumes:
+      - seaweeddata:/data
+
+  # Our own Kafka consumer: batches per partition, writes Parquet, commits only after the write.
+  bronze-writer:
+    build: ./bronze-writer
+    profiles: ["bronze"]
+    restart: on-failure
+    environment:
+      KAFKA_BOOTSTRAP: kafka:9092
+      GROUP_ID: bronze-writer
+      S3_ENDPOINT: http://seaweedfs:8333
+      S3_BUCKET: bronze
+      BATCH_MAX_RECORDS: 5000
+      BATCH_MAX_SECONDS: 30
+    depends_on:
+      kafka:
+        condition: service_healthy
+      seaweedfs:
+        condition: service_started
+
 volumes:
   pgdata:
   kafkadata:
+  seaweeddata:

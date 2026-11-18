@@ -21,6 +21,7 @@
 | 6 | **Taux d'échec de 16 à 31 %** | **Bug de modélisation** | L'argent fuit hors des clients | ✅ Corrigé en v1.1 (session 3) |
 | 7 | Tests d'intégration : `Could not find a valid Docker environment` | Dépendance | Testcontainers 1.21.3 incompatible avec Docker 29 | ✅ Corrigé (26/26 tests verts) |
 | 8 | Mode `live` : 422 à l'ouverture des comptes | Bug générateur | Même graine = mêmes numéros de téléphone | ✅ Corrigé (session 4) |
+| 9 | `bronze-writer depends on undefined service "kafka"` | Bug (doc) | Profil `cdc` oublié : le bronze dépend de Kafka | ✅ Corrigé (session 5) |
 
 Bilan : **le code Java a démarré du premier coup** (Flyway, validation Hibernate, ledger).
 Tous les blocages venaient de l'environnement, de la documentation ou du générateur.
@@ -554,6 +555,68 @@ téléphones, et chaque test partait d'une base vide.
 
 **À retenir :** un faux serveur de test doit appliquer **les mêmes contraintes** que le vrai,
 sinon il cache des bugs au lieu de les révéler.
+
+---
+
+## Session 5 — 18 novembre 2026 (nuit) : phase 2b, la couche bronze est prouvée ✅
+
+**Objectif :** copier chaque message Kafka dans des fichiers Parquet, sur un stockage S3, **sans perte ni
+doublon**, même si le consommateur plante (ADR 0007, sections 11 à 18 du guide phase 2).
+
+### Le chemin complet d'une transaction
+
+```
+POST /transfers → PostgreSQL (WAL) → Debezium → Kafka (3 partitions)
+               → bronze-writer (lots de 5 000 ou 30 s) → Parquet zstd → SeaweedFS (S3)
+```
+
+### Choix fait pendant la session : SeaweedFS au lieu de MinIO
+MinIO ne publie plus d'images Docker gratuites depuis octobre 2025. **SeaweedFS** parle la même API S3 :
+notre code (boto3) ne voit pas la différence. Ports : **8333** (API S3), **8888** (navigateur de fichiers).
+SeaweedFS a accepté les écritures sans configuration d'authentification en local.
+
+### Erreur rencontrée : `service "bronze-writer" depends on undefined service "kafka"`
+**Cause :** j'avais lancé seulement `--profile bronze`. Or Kafka est déclaré dans le profil `cdc`. Pour
+Docker Compose, un service hors profil actif **n'existe pas**.
+**Correction :** toujours activer les deux profils :
+```bat
+docker compose --profile cdc --profile bronze up -d --build
+```
+ou une fois pour toute la fenêtre : `set COMPOSE_PROFILES=cdc,bronze`. Le guide (section 16.2) est corrigé.
+
+### Ce que montrent les logs
+- **Rattrapage rapide :** un fichier de 5 000 lignes toutes les ~50 ms pour l'historique.
+- **Le minuteur de 30 s fonctionne :** les derniers fichiers font 4 594 ou 3 351 lignes, écrits ~30 s après
+  le dernier lot plein. Sans ce minuteur, les dernières données n'arriveraient jamais dans le bronze.
+- **Rangement des fichiers :** `transactions/dt=2026-11-18/partition=0/offset=000000040000.parquet`.
+  Le nom dépend **uniquement du premier offset du lot** : si le writer plante après l'écriture mais avant
+  la validation de l'offset, il réécrit **le même fichier** (écrasement, pas doublon).
+
+### Réconciliation du bronze : 0 trou, 0 doublon
+
+| Table | Lignes en Parquet | Fichiers | PostgreSQL | Partitions (offsets) | Résultat |
+|---|---|---|---|---|---|
+| `transactions` | **133 845** | 27 | 133 845 | 0-44593 / 0-44282 / 0-44967 | ✅ OK |
+| `ledger_entries` | **309 668** | 63 | 309 668 | 0-103247 / 0-103068 / 0-103350 | ✅ OK |
+| `accounts` | **2 172** | 3 | (messages, pas lignes) | 0-551 / 0-739 / 0-879 | ✅ OK |
+
+**Comment lire :** pour chaque partition, les offsets vont de 0 au dernier **sans aucun trou** et aucun
+offset n'apparaît deux fois. Comme chaque offset Kafka = un message = un changement PostgreSQL, on a la
+preuve que **toute la chaîne PostgreSQL → Kafka → Parquet est complète**.
+
+**Pourquoi `accounts` a 2 172 messages et pas ~2 000 lignes :** chaque mise à jour de solde produit un
+message `u` (update) en plus de la création `c`. Le bronze garde **l'historique des changements**, pas
+seulement l'état final. C'est justement ce qui permettra à la couche silver de reconstruire l'état à
+n'importe quelle date.
+
+### Ce que je sais expliquer maintenant
+| Question d'entretien | Réponse courte |
+|---|---|
+| Kafka garantit quoi ? | *At-least-once* si on valide l'offset après le traitement : un message peut être relu, jamais perdu. |
+| Comment évites-tu les doublons ? | Nom de fichier déterministe (premier offset du lot) : relire = réécrire le même fichier. **Effet exactly-once.** |
+| Pourquoi Parquet ? | Format colonnaire compressé (zstd) : Spark et dbt lisent seulement les colonnes utiles. |
+| Pourquoi garder le JSON brut dans `payload` ? | Le bronze ne transforme rien : si on se trompe plus tard, on peut tout recalculer depuis le brut. |
+| Comment prouves-tu qu'il ne manque rien ? | `reconcile` : offsets contigus par partition, totaux = PostgreSQL. |
 
 ---
 
