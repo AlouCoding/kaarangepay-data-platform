@@ -71,9 +71,24 @@ jobs:
       - run: mypy src
       - run: pytest -q
 
-  docker-images:
+  analytics:
     runs-on: ubuntu-latest
-    needs: [payment-core, traffic-generator, bronze-writer, lakehouse]
+    defaults:
+      run:
+        working-directory: analytics
     steps:
       - uses: actions/checkout@v4
-      - run: docker compose --profile traffic --profile cdc --profile bronze --profile lake build
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - run: pip install -e ".[dev]"
+      - run: ruff check src tests app
+      - run: mypy
+      - run: pytest -q   # real Delta tables + real dbt build + Streamlit AppTest
+
+  docker-images:
+    runs-on: ubuntu-latest
+    needs: [payment-core, traffic-generator, bronze-writer, lakehouse, analytics]
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose --profile traffic --profile cdc --profile bronze --profile lake --profile analytics build

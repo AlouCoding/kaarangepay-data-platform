@@ -1,0 +1,11 @@
+version: 2
+
+sources:
+  - name: raw
+    description: "Copied from the silver Delta tables (current state) and the gold fraud alerts by `analytics load`."
+    schema: raw
+    tables:
+      - name: accounts
+      - name: transactions
+      - name: ledger_entries
+      - name: fraud_alerts

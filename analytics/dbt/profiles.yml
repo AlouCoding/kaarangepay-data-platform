@@ -1,0 +1,10 @@
+# The DuckDB file is chosen by the pipeline (it builds into a temporary file, then swaps it in).
+kaarangepay:
+  target: dev
+  outputs:
+    dev:
+      type: duckdb
+      path: "{{ env_var('DUCKDB_PATH', '/warehouse/kaarangepay.duckdb') }}"
+      threads: 4
+      settings:
+        TimeZone: UTC   # Dakar is UTC+0 all year: UTC times are local times

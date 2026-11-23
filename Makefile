@@ -1,4 +1,4 @@
-.PHONY: help up down reset logs test test-java test-python backfill live integrity psql cdc-up cdc-status cdc-topics cdc-down bronze-up bronze-reconcile silver fraud fraud-eval
+.PHONY: help up down reset logs test test-java test-python backfill live integrity psql cdc-up cdc-status cdc-topics cdc-down bronze-up bronze-reconcile silver fraud fraud-eval pipeline dashboard
 
 help:            ## Show this help
 	@grep -E '^[a-z-]+:.*##' $(MAKEFILE_LIST) | awk -F':.*## ' '{printf "  \033[36m%-12s\033[0m %s\n", $$1, $$2}'
@@ -24,6 +24,7 @@ test-python:     ## Lint, type-check and test the Python services
 	cd traffic-generator && ruff check src tests && mypy src && pytest -q
 	cd bronze-writer && ruff check src tests && mypy src && pytest -q
 	cd lakehouse && ruff check src tests && mypy src && pytest -q
+	cd analytics && ruff check src tests app && mypy && pytest -q
 
 backfill:        ## Generate 30 days of history (Nov 2026) with simulated event times
 	mkdir -p data
@@ -67,3 +68,9 @@ fraud:           ## Phase 3b: streaming fraud detection on Kafka (processes what
 
 fraud-eval:      ## Phase 3b: precision / recall of the fraud alerts against the generator's labels
 	docker compose --profile cdc --profile bronze --profile lake run --rm lake fraud-eval
+
+pipeline:        ## Phase 4: silver -> DuckDB -> dbt build (models + tests) -> publish the warehouse
+	docker compose --profile cdc --profile bronze --profile lake --profile analytics run --rm analytics pipeline
+
+dashboard:       ## Phase 4: Streamlit app on http://localhost:8501 (business view + fraud console)
+	docker compose --profile cdc --profile bronze --profile lake --profile analytics up -d dashboard

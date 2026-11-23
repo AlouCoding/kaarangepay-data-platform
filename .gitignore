@@ -22,3 +22,11 @@ data/
 
 # Secrets
 .env
+
+# analytics (phase 4)
+analytics/dbt/target/
+analytics/dbt/logs/
+analytics/dbt/.user.yml
+*.duckdb
+*.duckdb.wal
+*.sqlite

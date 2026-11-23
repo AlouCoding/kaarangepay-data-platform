@@ -1,0 +1,71 @@
+version: 2
+
+models:
+  - name: dim_date
+    description: "Calendar of every day with activity; payday period = day >= 25 or <= 3 (generator assumption)."
+    columns:
+      - name: date_key
+        tests: [unique, not_null]
+
+  - name: dim_account
+    description: "One row per wallet with its current balance and how many fraud alerts named it as a mule."
+    columns:
+      - name: account_id
+        tests: [unique, not_null]
+      - name: account_type
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["CUSTOMER", "MERCHANT", "AGENT", "SYSTEM"]
+
+  - name: fct_transactions
+    description: "One row per transaction attempt (completed or failed), event-time grain."
+    columns:
+      - name: transaction_id
+        tests: [unique, not_null]
+      - name: transaction_type
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["FLOAT_TOPUP", "CASH_IN", "CASH_OUT", "TRANSFER", "PAYMENT"]
+      - name: status
+        tests:
+          - accepted_values:
+              arguments:
+                values: ["COMPLETED", "FAILED"]
+      - name: date_key
+        tests:
+          - not_null
+          - relationships:
+              arguments:
+                to: ref('dim_date')
+                field: date_key
+      - name: source_account_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_account')
+                field: account_id
+      - name: destination_account_id
+        tests:
+          - relationships:
+              arguments:
+                to: ref('dim_account')
+                field: account_id
+
+  - name: agg_daily_kpis
+    description: "Daily KPIs: transactions, failure rate, completed volume, fees earned, active payers, flagged fraud."
+    columns:
+      - name: date_key
+        tests: [unique, not_null]
+
+  - name: agg_by_type
+    description: "Mix by transaction type."
+  - name: agg_activity_by_hour
+    description: "Completed transactions by day of week and hour (heatmap)."
+
+  - name: fct_fraud_alerts
+    description: "One row per fraud alert (pass-through mule rule), deduplicated on alert_id."
+    columns:
+      - name: alert_id
+        tests: [unique, not_null]

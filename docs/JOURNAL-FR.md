@@ -742,6 +742,58 @@ Le job a **réussi**, mais il a inondé la console d'avertissements (~1 300 lign
 
 ---
 
+## Session 8 — 23 novembre 2026 : phase 4, dbt et l'appli pour les utilisateurs finaux ✅
+
+**Objectif :** que la direction et l'analyste fraude **voient** le travail (ADR 0010, guide `docs/GUIDE-PHASE4-FR.md`).
+Contrainte de temps (mémoire à rédiger) → périmètre resserré : dbt + appli Streamlit ; Airflow reporté.
+
+### Construit
+- `analytics/` : chargement des tables Delta (silver + alertes gold) dans DuckDB, projet **dbt** (4 modèles staging,
+  7 marts en étoile, 21 tests génériques + 4 tests singuliers), commande `analytics pipeline` qui ne publie **que si
+  tous les tests passent**.
+- Appli **Streamlit** : *Vue métier* (KPI, volume par jour coloré par période de paie, mix par type, carte de chaleur
+  jour × heure, taux d'échec) et *Console fraude* (alertes en direct toutes les 10 s, chemin victime → mule → agent,
+  boutons « fraude » / « faux positif »).
+
+### Bug trouvé par un test (avant même Docker)
+Après le renommage du fichier DuckDB, **les tables `marts` avaient disparu**. Cause : dbt tournait dans le même
+processus et gardait DuckDB ouvert ; ses dernières écritures étaient encore dans le fichier `.wal` à côté. Renommer
+la base laissait le WAL derrière. Correction : dbt dans un **processus séparé** + refus de publier si un `.wal` existe.
+**À retenir :** une base « embarquée » écrit d'abord dans un journal ; on ne déplace jamais un fichier de base ouvert.
+
+### Tests : 10/10 sans Docker
+Vraies tables Delta écrites avec delta-rs, vrai `dbt build`, pages Streamlit testées avec `AppTest`. Dont :
+un ledger cassé n'est **pas publié** (l'ancien entrepôt reste), une alerte en double est comptée une fois, une
+décision d'analyste survit à une reconstruction.
+
+### Résultats sur la vraie plateforme
+`analytics pipeline` : **PASS=32, ERROR=0**, publié en 21,6 s (dbt lui-même : 2,8 s).
+raw.accounts 1 112 · raw.transactions 133 845 · raw.ledger_entries 309 668 · raw.fraud_alerts 261 (Delta version 3).
+→ exactement les chiffres du silver : delta-rs lit bien les tables Delta sur SeaweedFS.
+
+**Ce que montre la Vue métier (et pourquoi c'est cohérent) :**
+
+| Chiffre affiché | Valeur | Recoupement |
+|---|---|---|
+| Transactions | 133 845 | = silver = PostgreSQL |
+| Frais perçus | **6,6 M XOF** | = solde du compte FEES mesuré en phase 1 (**6 630 233 XOF**) : deux calculs indépendants, même résultat |
+| Taux d'échec | **2,3 %** | = le taux annoncé par le générateur v1.1 |
+| Volume par jour | ~150-230 M XOF les jours de paie (25 → 3) contre ~50-70 M les autres jours | L'hypothèse « jours de paie » du générateur est **visible** dans les données |
+| Pic du 18/11 | ~160 M XOF un jour ordinaire | Jour du **trafic live** (session 4) ajouté au backfill |
+| Carte de chaleur | Activité de ~7 h à ~22 h, creux la nuit | Profil horaire du générateur |
+
+**Retouches après le premier affichage :** montant tronqué (« 3,2 Md … ») → unité déplacée dans le titre de la carte ;
+couleurs inversées (les jours ordinaires étaient en vert) → la **période de paie** est mise en avant, c'est elle l'histoire.
+
+**Piège rencontré : la traduction automatique de Chrome.** Le navigateur traduisait la page (français → français !) :
+« Console fraude » devenait « Fraude à la console », et « tests dbt » devenait « tests débités ». Désactiver la
+traduction pour `localhost`.
+
+**Console fraude testée de bout en bout :** sélection d'une alerte → chemin *victime → 1 264 443 XOF → mule → 1 259 443 XOF
+(retrait cash 20 min après) → agent*, puis « Confirmer la fraude » enregistré dans SQLite.
+
+---
+
 ### Requêtes SQL utiles (pour explorer soi-même)
 
 ```sql

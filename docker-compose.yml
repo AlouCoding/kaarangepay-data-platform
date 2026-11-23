@@ -211,7 +211,43 @@ services:
       kafka:
         condition: service_healthy
 
+  # ===========================================================================
+  # Phase 4 — analytics: silver Delta -> DuckDB -> dbt star schema -> Streamlit app
+  #   docker compose run --rm analytics pipeline   load + dbt build (models + tests) + publish
+  #   docker compose up -d dashboard               http://localhost:8501 (Vue métier + Console fraude)
+  # Profiles needed:  set COMPOSE_PROFILES=cdc,bronze,lake,analytics
+  # See docs/adr/0010 and docs/GUIDE-PHASE4-FR.md
+  # ===========================================================================
+  analytics:
+    build: ./analytics
+    profiles: ["analytics"]
+    environment: &analytics-env
+      SILVER_URI: s3://silver
+      GOLD_URI: s3://gold
+      S3_ENDPOINT: http://seaweedfs:8333
+    volumes:
+      - warehouse:/warehouse
+    depends_on:
+      seaweedfs:
+        condition: service_started
+
+  dashboard:
+    build: ./analytics
+    profiles: ["analytics"]
+    entrypoint: ["streamlit", "run", "app/Home.py", "--server.address=0.0.0.0"]
+    command: []
+    environment: *analytics-env
+    ports:
+      - "8501:8501"
+    volumes:
+      - warehouse:/warehouse
+    depends_on:
+      seaweedfs:
+        condition: service_started
+    restart: unless-stopped
+
 volumes:
   pgdata:
   kafkadata:
   seaweeddata:
+  warehouse:

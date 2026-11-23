@@ -1,0 +1,17 @@
+[theme]
+base = "light"
+primaryColor = "#0F6E56"
+backgroundColor = "#FAFAF7"
+secondaryBackgroundColor = "#EEF3EF"
+textColor = "#1F2A24"
+font = "sans serif"
+
+[server]
+headless = true
+port = 8501
+
+[browser]
+gatherUsageStats = false
+
+[client]
+toolbarMode = "viewer"   # no "Deploy" button: this is a demo app, not a dev session

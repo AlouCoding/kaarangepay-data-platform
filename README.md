@@ -11,7 +11,7 @@ A transactional core produces correct, realistic payment data: double-entry ledg
 idempotent API, fraud scenarios, paydays and holiday peaks. On top of it, a data
 platform captures, streams, models and checks that data (phases 2–5).
 
-> **Status: Phase 1 — transactional source** ✅ · **Phase 2a — CDC with Debezium + Kafka** ✅ · **Phase 2b — bronze layer** ✅ · **Phase 3a — silver (Spark + Delta)** ✅ · **Phase 3b — streaming fraud detection** ✅
+> **Status: Phase 1 — transactional source** ✅ · **Phase 2a — CDC with Debezium + Kafka** ✅ · **Phase 2b — bronze layer** ✅ · **Phase 3a — silver (Spark + Delta)** ✅ · **Phase 3b — streaming fraud detection** ✅ · **Phase 4 — dbt + app** ✅
 > KaaranguéPay is a fictional brand. Fee rules, traffic patterns and amounts are illustrative
 > assumptions, not data from any real operator.
 
@@ -39,7 +39,8 @@ flowchart LR
 | 2b. Bronze | Own Kafka consumer → raw CDC events as Parquet on S3-compatible storage (SeaweedFS), exactly-once effect | ✅ |
 | 3a. Silver | Spark rebuilds current-state Delta tables from bronze; ledger invariants re-checked on the lake | ✅ |
 | 3b. Streaming | Spark Structured Streaming on Kafka: stream-stream join (mule pattern), watermark, alerts topic + gold Delta, precision/recall vs labels | ✅ |
-| 4. Batch & BI | Airflow + dbt star schema, data quality tests, reconciliation, Superset | ⏳ |
+| 4. Analytics & app | dbt star schema on DuckDB, dbt tests (ledger invariants), atomic publication, Streamlit business view + live fraud console | ✅ |
+| 4c. Orchestration | Airflow DAG calling the same commands | ⏳ |
 | 5. ML & polish | Fraud model with MLflow, observability, Kubernetes, demo video | ⏳ |
 
 ## Why this domain
@@ -63,6 +64,7 @@ Each decision is documented as an [ADR](docs/adr). A French walkthrough with wor
 | [0007](docs/adr/0007-bronze-layer-writer.md) | Bronze layer: own consumer, write-then-commit, deterministic file keys, SeaweedFS instead of MinIO |
 | [0008](docs/adr/0008-silver-layer-spark-delta.md) | Silver layer: Spark full rebuild into Delta Lake, latest event per key by Kafka offset, quality gate |
 | [0009](docs/adr/0009-streaming-fraud-detection.md) | Real-time fraud: stream-stream join on event time, 45-min watermark, checkpoints, measured precision/recall |
+| [0010](docs/adr/0010-analytics-dbt-duckdb-streamlit.md) | Analytics: dbt on DuckDB, atomic publication only if all tests pass, Streamlit business view + fraud console |
 
 ### Concurrency
 Accounts are locked with `SELECT … FOR UPDATE` **in a global id order**, so concurrent
@@ -165,6 +167,27 @@ time** (`occurred_at`, 30-min bound, 45-min watermark so state stays bounded), a
 Honest reading: the simulated fraud follows exactly the pattern the rule looks for, so these numbers are an upper
 bound. The false positives are honest customers who withdraw a transfer right away (e.g. remittances) — the
 limit of a context-free rule, to be addressed with ML in phase 5.
+
+## Analytics and end-user app (phase 4)
+
+```bash
+docker compose --profile cdc --profile bronze --profile lake --profile analytics run --rm analytics pipeline
+docker compose --profile cdc --profile bronze --profile lake --profile analytics up -d dashboard   # http://localhost:8501
+```
+
+`analytics pipeline` reads the silver and gold **Delta** tables (through their transaction log, with delta-rs),
+builds a **dbt star schema** on DuckDB (`fct_transactions`, `dim_account`, `dim_date`, daily/type/hour aggregates,
+`fct_fraud_alerts`) and runs **dbt tests**, including the ledger invariants a third time. The new warehouse is
+swapped in **atomically, only if every test passed**: users never see wrong or half-built numbers.
+
+A **Streamlit** app serves two end users:
+- **Vue métier** (management): volume, fees, failure rate, payday effect, activity heatmap.
+- **Console fraude** (fraud analyst): live alerts from the streaming job, money path victim → mule → agent,
+  *confirm fraud* / *false positive* buttons. Decisions are stored apart and become training labels for phase 5.
+
+First run: `dbt build` **PASS=32, ERROR=0** (2.8 s); the app shows 133,845 transactions, **6.6 M XOF of fees** — the same
+figure as the FEES ledger account measured in phase 1 (6,630,233 XOF), computed independently — a 2.3 % failure rate,
+and a ×3 volume on payday days (25th → 3rd).
 
 ## Data model
 
@@ -277,6 +300,7 @@ CI runs both on every push (GitHub Actions).
 ├── traffic-generator/     Python package `mmgen`
 ├── bronze-writer/         Kafka → Parquet → S3 consumer (phase 2b)
 ├── lakehouse/             PySpark jobs: bronze → silver Delta tables + quality checks (phase 3)
+├── analytics/             dbt star schema on DuckDB + Streamlit app (phase 4)
 ├── cdc/connectors/        Debezium connector configuration
 ├── docs/adr/              Architecture Decision Records
 ├── docs/GUIDE-FR.md       Walkthrough with workflow diagrams (French)
