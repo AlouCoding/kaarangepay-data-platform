@@ -40,7 +40,7 @@ st.altair_chart(
         tooltip=[alt.Tooltip("day:T", title="Jour"), "day_name_fr:N", alt.Tooltip("volume_xof:Q", format=",.0f"),
                  "transactions:Q", alt.Tooltip("failure_rate:Q", format=".1%")],
     ).properties(height=280),
-    use_container_width=True,
+    width="stretch",
 )
 
 left, right = st.columns(2)
@@ -54,7 +54,7 @@ with left:
             tooltip=["transaction_type", "transactions", alt.Tooltip("volume_xof:Q", format=",.0f"),
                      alt.Tooltip("fees_xof:Q", format=",.0f"), alt.Tooltip("failure_rate:Q", format=".1%")],
         ).properties(height=260),
-        use_container_width=True,
+        width="stretch",
     )
 with right:
     st.subheader("Quand les gens paient-ils ?")
@@ -67,7 +67,7 @@ with right:
             color=alt.Color("transactions:Q", scale=alt.Scale(scheme="greens"), legend=None),
             tooltip=["day_name_fr", "hour_of_day", "transactions"],
         ).properties(height=260),
-        use_container_width=True,
+        width="stretch",
     )
 
 st.subheader("Taux d'échec quotidien")
@@ -77,7 +77,7 @@ st.altair_chart(
         y=alt.Y("failure_rate:Q", title=None, axis=alt.Axis(format="%")),
         tooltip=[alt.Tooltip("day:T"), alt.Tooltip("failure_rate:Q", format=".2%")],
     ).properties(height=200),
-    use_container_width=True,
+    width="stretch",
 )
 with st.expander("Comment ces chiffres sont calculés"):
     st.markdown(

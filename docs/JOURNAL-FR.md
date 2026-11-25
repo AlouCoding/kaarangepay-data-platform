@@ -792,6 +792,12 @@ traduction pour `localhost`.
 **Console fraude testée de bout en bout :** sélection d'une alerte → chemin *victime → 1 264 443 XOF → mule → 1 259 443 XOF
 (retrait cash 20 min après) → agent*, puis « Confirmer la fraude » enregistré dans SQLite.
 
+**Après une mise en veille du PC : `ERR_EMPTY_RESPONSE` sur localhost:8501.** Les logs montraient pourtant
+`Uvicorn server started on 0.0.0.0:8501` : l'appli tournait, c'est la redirection de ports Docker Desktop/WSL qui
+était bloquée. `docker compose restart dashboard` a suffi. Au passage : `payment-core` et `bronze-writer` étaient
+repartis seuls (politique `restart`) sans PostgreSQL ni Kafka, donc en boucle → arrêtés. Les avertissements Streamlit
+`use_container_width` (paramètre obsolète) sont remplacés par `width="stretch"`.
+
 ---
 
 ### Requêtes SQL utiles (pour explorer soi-même)
